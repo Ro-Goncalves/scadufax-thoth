@@ -15,6 +15,8 @@
         <javalin.version>7.2.2</javalin.version>
         <jackson.version>2.19.1</jackson.version>
         <slf4j.version>2.0.17</slf4j.version>
+        <junit.version>5.11.0</junit.version>
+        <maven.surefire.plugin.version>3.5.0</maven.surefire.plugin.version>
         <maven.compiler.plugin.version>3.14.0</maven.compiler.plugin.version>
     </properties>
 
@@ -40,6 +42,12 @@
             <version>${slf4j.version}</version>
             <scope>runtime</scope>
         </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -50,6 +58,14 @@
                 <version>${maven.compiler.plugin.version}</version>
                 <configuration>
                     <release>${maven.compiler.release}</release>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${maven.surefire.plugin.version}</version>
+                <configuration>
+                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
                 </configuration>
             </plugin>
         </plugins>
