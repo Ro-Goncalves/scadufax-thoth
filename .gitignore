@@ -21,3 +21,6 @@ replay_pid*
 build/
 target/
 out/
+
+.vscode/
+dataset.bin
