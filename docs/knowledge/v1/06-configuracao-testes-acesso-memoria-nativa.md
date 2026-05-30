@@ -1,6 +1,6 @@
 # Configuração de Testes: Acesso à Memória Nativa
 
-Como o núcleo do nosso motor de busca baseia-se na **FFM API (Foreign Function & Memory API)** do Java 21+ para manipular memória *Off-Heap*, enfrentamos um desafio arquitetural na hora de escrever testes unitários.
+Como o núcleo do nosso motor de busca baseia-se na **FFM API** do Java 21+ para manipular memória *Off-Heap*, enfrentamos um desafio arquitetural na hora de escrever testes unitários.
 
 Para testar o cálculo matemático, nós simulamos um trecho de memória nativa utilizando o `Arena.ofConfined()`. No entanto, para que esse teste rode com sucesso automatizado via Maven, foi necessário incluir uma configuração específica no **Maven Surefire Plugin**.
 

@@ -84,6 +84,14 @@ Muitas APIs modernas de acesso à memória e processadores tendem a ler a memór
 
 Quando a aplicação for mapear este `dataset.bin` para a memória na Fase B, é **obrigatório** configurar o leitor para utilizar a ordem `ByteOrder.BIG_ENDIAN` ou `ByteOrder.nativeOrder()` dependendo de como o buffer for configurado. Se houver divergência no *Endianness*, um valor como `0.5` será interpretado pelo leitor como um número astronômico ou completamente corrompido, arruinando a precisão da busca vetorial.
 
+### Desalinhamento Intencional e Ausência de *Padding*
+
+Como consequência direta da nossa abordagem de remoção de "gordura" estrutural, o arquivo binário gerado é extremamente compacto, mas **não é alinhado em memória**.
+
+Processadores modernos preferem ler dados primitivos a partir de endereços que sejam múltiplos exatos do seu tamanho. No nosso layout, como a `String` do *Label* tem um tamanho dinâmico, o vetor de `floats` subsequente frequentemente começa em um endereço "quebrado".
+
+Para maximizar a economia de espaço em disco e o uso da memória RAM, tomamos a decisão arquitetural de não aplicar padding ao final de cada registro durante a gravação. O trade-off dessa densidade extrema ocorre na Fase B: ao mapear o arquivo na memória, a aplicação precisa adotar layouts de leitura relaxados. Isso obriga a CPU a executar leituras fracionadas, adicionando um custo marginal de ciclos de processamento por requisição, um impacto assumido como válido e aceitável para a nossa versão baseline de força bruta.
+
 ### Resumo para a Engenharia
 
 O `DatasetBuilder` aplica o conceito de **"Assar os Dados"**. Gastamos o processamento (CPU e disco) de forma inteligente durante a construção da imagem Docker para garantir que, quando a aplicação principal subir para receber requisições de busca, ela encontre os dados em sua forma mais limpa, compacta e performática possível.

@@ -18,11 +18,14 @@ Esta classe implementa a **Distância Euclidiana**, que é, geometricamente, a d
 ### O Controle de Endianness
 
 ```java
-private static final ValueLayout.OfFloat JAVA_FLOAT_BE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.BIG_ENDIAN);
+private static final ValueLayout.OfFloat JAVA_FLOAT_BE_UNALIGNED = 
+    ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
 ```
 
-* **Por que `BIG_ENDIAN`?** Como documentado na fase de Geração do Dataset, o nosso arquivo binário foi gravado usando o padrão `BIG_ENDIAN`. O Sistema Operacional e o processador geralmente operam em `LITTLE_ENDIAN`. Se não forçarmos a leitura para `BIG_ENDIAN`, os bytes serão lidos de trás para frente, e um valor como `0.15` será interpretado pelo Java como um número gigantesco ou corrompido.
-* **Por que `static final`?** Instanciar regras de formatação é custoso. Como essa classe será chamada milhões de vezes por segundo, deixamos essa configuração estática na memória para ser reutilizada, economizando CPU e Garbage Collector.
+* **Por que `BIG_ENDIAN`?** O nosso arquivo binário foi gravado usando o padrão `BIG_ENDIAN`. O Sistema Operacional geralmente opera em `LITTLE_ENDIAN`. Se não forçarmos a leitura para `BIG_ENDIAN`, os bytes serão lidos de trás para frente, e um valor como `0.15` será interpretado como um número astronômico ou corrompido.
+* **O Incidente do Alinhamento (`_UNALIGNED`):** Durante os primeiros testes de carga, a aplicação sofreu *crashes* imediatos com a exceção `Target offset incompatible with alignment constraint 4`. A FFM API do Java moderno exige que a leitura de blocos de 4 bytes (como um `float`) inicie em endereços que sejam múltiplos exatos de 4. Como optamos por um arquivo binário denso sem *Padding* (preenchimento de bytes), o nosso cursor frequentemente parava em endereços "quebrados" (ex: byte 13).
+* **A Solução (Trade-off):** Fomos obrigados a adotar o `JAVA_FLOAT_UNALIGNED` (e seu equivalente para inteiros). Isso desliga a restrição rígida de arquitetura da JVM e instrui a CPU a realizar leituras fracionadas. Essa decisão salva a nossa infraestrutura condensada de memória e armazenamento, assumindo em troca um *overhead* marginal de processamento.
+* **Por que `static final`?** Instanciar regras de formatação na FFM API é custoso. Como essa classe será chamada dezenas de milhões de vezes por segundo, deixamos essa configuração estática na memória para ser reutilizada.
 
 ### A Gestão do Ponteiro
 
@@ -37,10 +40,11 @@ long currentOffset = offset; // Usamos uma variável local para não alterar o o
 
 ```java
 for (int i = 0; i < dimensions; i++) {
-    float vectorVal = segment.get(JAVA_FLOAT_BE, currentOffset);
+    // Note a utilização mandatória do layout UNALIGNED
+    float vectorVal = segment.get(JAVA_FLOAT_BE_UNALIGNED, currentOffset);
     float diff = queryVector[i] - vectorVal;
     squaredDistance += (diff * diff);
-    currentOffset += 4; // Avança 4 bytes (tamanho de um float)
+    currentOffset += 4; // Avança 4 bytes (tamanho exato de um float)
 }
 ```
 
