@@ -24,3 +24,5 @@ out/
 
 .vscode/
 dataset.bin
+.m2repo
+TODO.md
