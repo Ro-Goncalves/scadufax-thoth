@@ -8,7 +8,7 @@ public final class ScadufaxThothApplication {
     private ScadufaxThothApplication() {
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         AppConfig config = AppConfig.fromEnvironment();
         new JavalinBootstrap(config).start();
     }
