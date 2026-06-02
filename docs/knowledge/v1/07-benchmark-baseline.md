@@ -9,28 +9,44 @@ Para garantir a evolução técnica orientada a dados do *Scadufax Thoth*, regis
 * **Restrição de Hardware:** `0.45 vCPU` e `165MB` de memória por instância.
 * **Carga:** 1 Virtual User, 5 iterações completas.
 
-## Resultado do K6 (Output Bruto)
+## Resultado do K6
 
-```text
-    █ THRESHOLDS 
+```
+█ THRESHOLDS 
 
-      checks
-      ✓ 'rate==1.0' rate=100.00%
+  checks
+  ✓ 'rate==1.0' rate=100.00%
 
-      http_req_failed
-      ✓ 'rate==0.0' rate=0.00%
+  http_req_failed
+  ✓ 'rate==0.0' rate=0.00%
 
-    █ TOTAL RESULTS 
 
-      checks_total.......: 20      3.585023/s
-      checks_succeeded...: 100.00% 20 out of 20
-      checks_failed......: 0.00%   0 out of 20
+█ TOTAL RESULTS 
 
-      HTTP
-      http_req_duration..............: avg=1.11s min=401.85ms med=733.9ms  max=1.92s p(90)=1.87s p(95)=1.9s 
-      http_req_failed................: 0.00%  0 out of 5
-      http_reqs......................: 5      0.896256/s
+  checks_total.......: 20      2.726039/s
+  checks_succeeded...: 100.00% 20 out of 20
+  checks_failed......: 0.00%   0 out of 20
 
+  ✓ status is 200
+  ✓ body is json
+  ✓ approved is boolean
+  ✓ fraud_score is number
+
+  HTTP
+  http_req_duration..............: avg=1.46s min=323.93ms med=1.43s max=2.25s p(90)=2.17s p(95)=2.21s
+    { expected_response:true }...: avg=1.46s min=323.93ms med=1.43s max=2.25s p(90)=2.17s p(95)=2.21s
+  http_req_failed................: 0.00%  0 out of 5
+  http_reqs......................: 5      0.68151/s
+
+  EXECUTION
+  iteration_duration.............: avg=1.37s min=324.29ms med=1.43s max=2.25s p(90)=2.17s p(95)=2.21s
+  iterations.....................: 5      0.68151/s
+  vus............................: 1      min=1      max=1
+  vus_max........................: 1      min=1      max=1
+
+  NETWORK
+  data_received..................: 945 B  129 B/s
+  data_sent......................: 2.9 kB 393 B/s
 ```
 
 ## Análise Arquitetural do Resultado
