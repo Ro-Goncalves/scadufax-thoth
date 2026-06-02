@@ -3,9 +3,7 @@ services:
     build: .
     environment:
       - PORT=8080
-      - DATASET_PATH=/app/dataset.bin
-    volumes:
-      - ./dataset.bin:/app/dataset.bin:ro # Monta como Read-Only
+      - DATA_DIR=/data
     deploy:
       resources:
         limits:
@@ -16,9 +14,7 @@ services:
     build: .
     environment:
       - PORT=8080
-      - DATASET_PATH=/app/dataset.bin
-    volumes:
-      - ./dataset.bin:/app/dataset.bin:ro
+      - DATA_DIR=/data
     deploy:
       resources:
         limits:

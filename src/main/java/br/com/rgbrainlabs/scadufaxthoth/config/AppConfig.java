@@ -9,22 +9,25 @@ import java.util.Map;
 public record AppConfig(
         int port,
         String datasetPath,
+        String dataDir,
         Map<String, Float> normalizationMap,
         Map<String, Float> mccRiskMap
 ) {
     private static final String DEFAULT_PORT = "9999";
     private static final String DEFAULT_DATASET_PATH = "dataset.bin";
+    private static final String DEFAULT_DATA_DIR = "./data";
 
     public static AppConfig fromEnvironment() {
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", DEFAULT_PORT));
         String datasetPath = System.getenv().getOrDefault("DATASET_PATH", DEFAULT_DATASET_PATH);
-       
+        String dataDir = System.getenv().getOrDefault("DATA_DIR", DEFAULT_DATA_DIR);
+
         ObjectMapper bootMapper = new ObjectMapper();
 
         Map<String, Float> normMap = loadMapFromJar(bootMapper, "/normalization.json");
         Map<String, Float> mccMap = loadMapFromJar(bootMapper, "/mcc_risk.json");
 
-        return new AppConfig(port, datasetPath, normMap, mccMap);
+        return new AppConfig(port, datasetPath, dataDir, normMap, mccMap);
     }
 
     private static Map<String, Float> loadMapFromJar(ObjectMapper mapper, String resourcePath) {        
