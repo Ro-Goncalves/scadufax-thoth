@@ -64,15 +64,16 @@ class V2EndToEndTest {
         V2ArtifactBuilder.build(gz, artifact);
 
         assertTrue(Files.exists(artifact), "Artefato V2 deve existir após o build");
-        // Header (24) + 1 cluster (30) + 6 registros × 16 = 150 bytes
-        assertEquals(24 + 30 + 6 * 16L, Files.size(artifact),
-                "Tamanho do artefato deve ser exato: header + cluster + registros");
+        // header(24) + 6 clusters×30(180) + 6 registros×16(96) = 300 bytes
+        // (K-means cap: actualK = min(256, 6) = 6)
+        assertEquals(24 + 6 * 30 + 6 * 16L, Files.size(artifact),
+                "Tamanho do artefato deve ser exato: header + clusters + registros");
 
         // ── 2. Bootstrap: cria o searcher e sobe o Javalin ──────────────────────
         V2IndexSearcher searcher = new V2IndexSearcher(artifact, new EuclideanDistanceCalculator());
         TransactionVectorizer vectorizer = new TransactionVectorizer(normMap(), Map.of());
 
-        SearchHandler searchHandler = new SearchHandler(searcher, vectorizer);
+        SearchHandler searchHandler = new SearchHandler(searcher, vectorizer, 5, 0.6);
         ReadyHandler  readyHandler  = new ReadyHandler();
 
         Javalin app = Javalin.create(cfg -> {

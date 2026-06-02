@@ -12,24 +12,26 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.PriorityQueue;
 
 /**
- * Buscador força-bruta sobre o artefato binário V2.
+ * Buscador IVF (Inverted File Index) sobre o artefato binário V2.
  *
- * Lê o cabeçalho e o diretório de clusters com DataInputStream (big-endian),
- * mapeia o arquivo inteiro em memória nativa via Arena e acessa os registros
- * por offset aritmético direto, sem parsing por registro.
+ * Em tempo de consulta:
+ *   1. Quantiza a query para int8.
+ *   2. Calcula distância euclidiana ao quadrado entre a query e cada centróide.
+ *   3. Seleciona os nprobe clusters mais próximos.
+ *   4. Escaneia apenas os registros desses clusters com max-heap de tamanho k.
  *
- * Nesta fatia (Issue 01) o diretório tem 1 cluster. A busca percorre todos os
- * registros em sequência — idêntico ao brute force, mas sobre o formato V2.
- * A navegação seletiva por clusters (IVF real) entra na Issue 02.
+ * O artefato pode ter qualquer número de clusters ≥ 1. Se nprobe ≥ numClusters,
+ * o comportamento é equivalente ao brute force da Issue 01.
  *
- * Layout do registro (16 bytes fixos):
- *   [0]    label   byte  — 0=legítimo, 1=fraude
- *   [1-14] vetor   bytes — int8, sentinela −128 para ausência de last_transaction
- *   [15]   padding byte  — reservado
+ * Layout do arquivo:
+ *   [Header 24 bytes]
+ *   [Diretório: numClusters × 30 bytes]  — centróide(14) + radius(4) + offset(8) + count(4)
+ *   [Blocos de registros por cluster]    — 16 bytes cada: label(1) + vetor(14) + padding(1)
  */
 public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
@@ -37,22 +39,34 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     private static final int SCALE       = V2ArtifactBuilder.SCALE;
     private static final int RECORD_SIZE = V2ArtifactBuilder.RECORD_SIZE;
 
-    private final int count;
-    private final long dataOffset;
-    private final Arena arena;
+    private final int       numClusters;
+    private final int       nprobe;
+    private final long      dataOffset;
+    private final byte[][]  centroids;    // int8, um por cluster
+    private final int[]     counts;       // registros por cluster
+    private final long[]    offsets;      // offsets relativos ao dataOffset
+    private final Arena     arena;
     private final MemorySegment file;
     private final DistanceCalculator calculator;
 
+    /** Retrocompatível — nprobe padrão = 8. */
     public V2IndexSearcher(Path artifactPath, DistanceCalculator calculator) throws IOException {
+        this(artifactPath, calculator, 8);
+    }
+
+    public V2IndexSearcher(Path artifactPath, DistanceCalculator calculator, int nprobe)
+            throws IOException {
         this.calculator = calculator;
-        this.arena = Arena.ofShared();
+        this.nprobe     = nprobe;
+        this.arena      = Arena.ofShared();
 
-        // Lê cabeçalho e diretório de clusters via DataInputStream (big-endian)
         Header header = readHeader(artifactPath);
-        this.dataOffset = header.dataOffset;
-        this.count      = header.count;
+        this.numClusters = header.numClusters;
+        this.dataOffset  = header.dataOffset;
+        this.centroids   = header.centroids;
+        this.counts      = header.counts;
+        this.offsets     = header.offsets;
 
-        // mmap do arquivo inteiro — o FileChannel pode ser fechado após o map
         try (FileChannel ch = FileChannel.open(artifactPath, StandardOpenOption.READ)) {
             this.file = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size(), arena);
         }
@@ -61,24 +75,32 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     @Override
     public List<SearchResult> search(float[] queryVector, int k) {
         byte[] q = quantizeQuery(queryVector);
+
+        // Ordena clusters por distância crescente ao centróide
+        int[] ranked = rankClusters(q);
+
         PriorityQueue<SearchResult> pq = new PriorityQueue<>(k);
+        int probes = Math.min(nprobe, numClusters);
 
-        for (int i = 0; i < count; i++) {
-            long recordBase = dataOffset + (long) i * RECORD_SIZE;
+        for (int ci = 0; ci < probes; ci++) {
+            int cluster = ranked[ci];
+            long blockStart = dataOffset + offsets[cluster];
+            int  blockCount = counts[cluster];
 
-            // Byte 0 do registro: label (0 = legítimo, 1 = fraude)
-            byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
-            String label = labelByte == 1 ? "fraud" : "legitimate";
+            for (int i = 0; i < blockCount; i++) {
+                long recordBase = blockStart + (long) i * RECORD_SIZE;
 
-            // Bytes 1–14 do registro: vetor int8
-            long vectorBase = recordBase + 1;
-            double dist = calculator.calculateI8(q, file, vectorBase, DIMS);
+                byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+                String label = labelByte == 1 ? "fraud" : "legitimate";
 
-            if (pq.size() < k) {
-                pq.offer(new SearchResult(label, dist));
-            } else if (dist < pq.peek().distance()) {
-                pq.poll();
-                pq.offer(new SearchResult(label, dist));
+                double dist = calculator.calculateI8(q, file, recordBase + 1, DIMS);
+
+                if (pq.size() < k) {
+                    pq.offer(new SearchResult(label, dist));
+                } else if (dist < pq.peek().distance()) {
+                    pq.poll();
+                    pq.offer(new SearchResult(label, dist));
+                }
             }
         }
 
@@ -92,12 +114,40 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         arena.close();
     }
 
-    private record Header(long dataOffset, int count) {}
+    // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    /**
-     * Lê e valida o cabeçalho e a primeira entrada do diretório de clusters.
-     * DataInputStream usa big-endian — mesmo byte order do DataOutputStream do builder.
-     */
+    /** Ordena os índices de cluster por distância euclidiana ao quadrado até q. */
+    private int[] rankClusters(byte[] q) {
+        Integer[] idx = new Integer[numClusters];
+        int[] dists   = new int[numClusters];
+
+        for (int c = 0; c < numClusters; c++) {
+            idx[c]   = c;
+            dists[c] = centroidDist(q, centroids[c]);
+        }
+
+        Arrays.sort(idx, (a, b) -> Integer.compare(dists[a], dists[b]));
+
+        int[] result = new int[numClusters];
+        for (int i = 0; i < numClusters; i++) result[i] = idx[i];
+        return result;
+    }
+
+    /** Distância euclidiana ao quadrado entre dois vetores int8. */
+    private static int centroidDist(byte[] q, byte[] c) {
+        int sum = 0;
+        for (int d = 0; d < DIMS; d++) {
+            int diff = q[d] - c[d];
+            sum += diff * diff;
+        }
+        return sum;
+    }
+
+    // ── Leitura do cabeçalho e diretório ─────────────────────────────────────────
+
+    private record Header(int numClusters, long dataOffset,
+                          byte[][] centroids, int[] counts, long[] offsets) {}
+
     private static Header readHeader(Path artifactPath) throws IOException {
         try (InputStream raw = new BufferedInputStream(Files.newInputStream(artifactPath));
              DataInputStream dis = new DataInputStream(raw)) {
@@ -113,27 +163,28 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
                 throw new IllegalStateException(
                         "Tipo I8 esperado (dtype=1), encontrado: " + dtype);
             }
-            dis.readInt();              // numClusters — lido para avançar o cursor
-            dis.readLong();             // clusterDirOffset — lido para avançar o cursor
-            long dataOffset = dis.readLong();
+            int  numClusters      = dis.readInt();
+            dis.readLong();                  // clusterDirOffset — imediatamente após header
+            long dataOffset       = dis.readLong();
 
-            // Primeira entrada do diretório: centróide(dims) + radius(4) + offset(8) + count(4)
-            dis.readNBytes(dims);       // centróide — ignorado no brute force
-            dis.readFloat();            // raio     — ignorado
-            dis.readLong();             // offset   — ignorado (único cluster começa em 0)
-            int count = dis.readInt();
+            byte[][] centroids = new byte[numClusters][dims];
+            int[]    counts    = new int[numClusters];
+            long[]   offsets   = new long[numClusters];
 
-            return new Header(dataOffset, count);
+            for (int c = 0; c < numClusters; c++) {
+                dis.readFully(centroids[c]);  // centróide int8 (dims bytes)
+                dis.readFloat();              // radius — ignorado no IVF por distância
+                offsets[c] = dis.readLong();
+                counts[c]  = dis.readInt();
+            }
+
+            return new Header(numClusters, dataOffset, centroids, counts, offsets);
         }
     }
 
     /**
      * Quantiza o vetor de query com a mesma regra do V2ArtifactBuilder:
      *   −1.0f → −128 (sentinela), demais → round(v × 127), clamp [−127, 127].
-     *
-     * Usar a mesma função de encode no builder e no searcher garante que a
-     * distância entre dois vetores com sentinela seja zero (ausência == ausência),
-     * preservando a semântica do vizinho mais próximo.
      */
     private static byte[] quantizeQuery(float[] v) {
         byte[] q = new byte[DIMS];

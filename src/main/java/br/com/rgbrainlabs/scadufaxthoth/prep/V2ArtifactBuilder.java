@@ -7,23 +7,21 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.zip.GZIPInputStream;
 
 /**
  * Gera o artefato binário V2 — um único arquivo com layout:
  *
- *   [Header 24 bytes] → [Diretório de Clusters] → [Blocos de Registros]
+ *   [Header 24 bytes] → [Diretório de Clusters K×30 bytes] → [Blocos de Registros]
  *
- * Nesta fatia (Issue 01) o diretório tem sempre 1 cluster contendo todos os
- * registros. O IVF real com múltiplos clusters entra na Issue 02.
+ * Diferença da Issue 01: agora o builder executa K-means (Lloyd's int8) e escreve
+ * um cluster por grupo. O diretório de clusters carrega centróide real, offset e
+ * count de cada bloco. O V2IndexSearcher usa esse diretório para IVF real.
  *
- * Diferença-chave em relação ao QuantizedDatasetBuilder:
- *   - Arquivo único em vez de múltiplos arquivos separados.
- *   - Label binária (1 byte) embutida em cada registro.
- *   - Sentinela −128 (Byte.MIN_VALUE) para ausência de last_transaction,
- *     em vez de −127 usado no formato anterior.
- *
- * Uso: java ...V2ArtifactBuilder <references.json.gz> <output.v2>
+ * Uso:
+ *   java ...V2ArtifactBuilder <input.json.gz> <output.v2> [numClusters] [iterations] [seed]
  */
 public final class V2ArtifactBuilder {
 
@@ -32,39 +30,54 @@ public final class V2ArtifactBuilder {
     public static final int  DIMS          = 14;
     public static final int  SCALE         = 127;
 
-    // Tamanhos fixos do formato V2
-    public static final int HEADER_SIZE       = 24; // 1+2+1+4+8+8
+    public static final int HEADER_SIZE        = 24; // 1+2+1+4+8+8
     public static final int CLUSTER_ENTRY_SIZE = 30; // 14(centróide)+4(radius)+8(offset)+4(count)
-    public static final int RECORD_SIZE       = 16; // 1(label)+14(vetor)+1(padding)
+    public static final int RECORD_SIZE        = 16; // 1(label)+14(vetor)+1(padding)
+
+    public static final int DEFAULT_NUM_CLUSTERS    = 256;
+    public static final int DEFAULT_KMEANS_ITER     = 20;
+    public static final long DEFAULT_KMEANS_SEED    = 42L;
 
     private static final int LOG_EVERY = 500_000;
 
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
-            System.err.println("Uso: V2ArtifactBuilder <references.json.gz> <output.v2>");
+            System.err.println("Uso: V2ArtifactBuilder <input.json.gz> <output.v2> [numClusters] [iterations] [seed]");
             System.exit(1);
         }
-        build(Path.of(args[0]), Path.of(args[1]));
+        int  numClusters = args.length > 2 ? Integer.parseInt(args[2])  : DEFAULT_NUM_CLUSTERS;
+        int  iterations  = args.length > 3 ? Integer.parseInt(args[3])  : DEFAULT_KMEANS_ITER;
+        long seed        = args.length > 4 ? Long.parseLong(args[4])    : DEFAULT_KMEANS_SEED;
+
+        build(Path.of(args[0]), Path.of(args[1]), numClusters, iterations, seed);
+    }
+
+    /** Overload retrocompatível com defaults. */
+    public static void build(Path input, Path output) throws Exception {
+        build(input, output, DEFAULT_NUM_CLUSTERS, DEFAULT_KMEANS_ITER, DEFAULT_KMEANS_SEED);
     }
 
     /**
-     * Constrói o artefato V2 em duas passagens:
-     *   Pass 1 — lê o JSON e grava só os registros (16 bytes cada) num arquivo temp.
-     *   Pass 2 — monta o arquivo final: header + entrada de cluster + copia o temp.
+     * Constrói o artefato V2 multi-cluster em duas fases:
      *
-     * A separação em duas passagens é necessária porque o header precisa do count
-     * (total de registros), que só é conhecido após varrer todo o JSON.
+     *   Fase 1 — streaming: lê o JSON.GZ, quantiza para int8, grava temp e
+     *             acumula todos os vetores em memória (~14 bytes × N).
+     *   K-means — agrupa os vetores com Lloyd's int8.
+     *   Fase 2 — escrita: header + diretório + blocos de registros por cluster.
      */
-    public static void build(Path input, Path output) throws Exception {
+    public static void build(Path input, Path output,
+                              int numClusters, int kmeansIterations, long kmeansSeed)
+            throws Exception {
         Files.createDirectories(output.getParent() != null ? output.getParent() : Path.of("."));
 
         Path tempRecords = output.resolveSibling(output.getFileName() + ".tmp");
         long t0 = System.currentTimeMillis();
         System.out.println("[v2-builder] lendo " + input.toAbsolutePath());
 
-        // ── Pass 1: streaming do JSON → registros binários em temp ─────────────
+        // ── Fase 1: streaming JSON → temp + coleta vetores int8 em memória ─────
 
-        int count = 0;
+        List<byte[]>   allVectors = new ArrayList<>();
+        List<Boolean>  allLabels  = new ArrayList<>();
         byte[] row = new byte[RECORD_SIZE];
         ObjectMapper mapper = new ObjectMapper();
 
@@ -96,59 +109,114 @@ public final class V2ArtifactBuilder {
                     }
                 }
 
+                int count = allVectors.size();
                 if (dim != DIMS) {
                     throw new IllegalStateException(
                             "Registro " + count + " tem " + dim + " dims; esperado " + DIMS + ".");
                 }
 
+                // quantiza e grava no temp
                 row[0] = isFraud ? (byte) 1 : (byte) 0;
                 encodeI8(floats, row, 1);
-                row[15] = 0; // padding reservado para uso futuro
+                row[15] = 0;
                 tmp.write(row);
-                count++;
 
-                if (count % LOG_EVERY == 0) {
+                // mantém cópia do vetor int8 para K-means
+                byte[] vec = new byte[DIMS];
+                System.arraycopy(row, 1, vec, 0, DIMS);
+                allVectors.add(vec);
+                allLabels.add(isFraud);
+
+                if ((count + 1) % LOG_EVERY == 0) {
                     System.out.printf("[v2-builder] %d registros (%.1fs)%n",
-                            count, (System.currentTimeMillis() - t0) / 1000.0);
+                            count + 1, (System.currentTimeMillis() - t0) / 1000.0);
                 }
             }
         }
 
-        // ── Pass 2: header + entrada de cluster + copia os registros ───────────
+        int n = allVectors.size();
+        System.out.printf("[v2-builder] %d registros lidos (%.1fs) — rodando K-means k=%d iter=%d%n",
+                n, (System.currentTimeMillis() - t0) / 1000.0, numClusters, kmeansIterations);
 
-        // data_offset = onde os registros começam no arquivo final
-        long dataOffset = HEADER_SIZE + (long) CLUSTER_ENTRY_SIZE; // 24 + 30 = 54
+        // ── K-means sobre os vetores int8 ────────────────────────────────────────
+
+        byte[][] vectors = allVectors.toArray(new byte[0][]);
+        KMeansClusterer clusterer = new KMeansClusterer(numClusters, kmeansIterations, kmeansSeed);
+        KMeansClusterer.ClusterResult kmResult = clusterer.cluster(vectors);
+        byte[][] centroids  = kmResult.centroids();
+        int[]    assignments = kmResult.assignments();
+        int actualK = centroids.length;
+
+        System.out.printf("[v2-builder] K-means concluído: %d clusters (%.1fs)%n",
+                actualK, (System.currentTimeMillis() - t0) / 1000.0);
+
+        // ── Calcula tamanhos e offsets de cada cluster ────────────────────────────
+
+        int[] clusterCount = new int[actualK];
+        for (int a : assignments) clusterCount[a]++;
+
+        long[] clusterOffset = new long[actualK]; // relativo ao dataOffset
+        long running = 0;
+        for (int c = 0; c < actualK; c++) {
+            clusterOffset[c] = running;
+            running += (long) clusterCount[c] * RECORD_SIZE;
+        }
+
+        // ── Fase 2: header + diretório + blocos de registros ─────────────────────
+
+        long dataOffset = HEADER_SIZE + (long) actualK * CLUSTER_ENTRY_SIZE;
+
+        // Monta os registros agrupados por cluster em memória (índices de posição)
+        // Para não re-ler o temp file, re-lemos os bytes do temp e os distribuímos.
+        // Alocamos um buffer por cluster.
+        byte[][] clusterBuffers = new byte[actualK][];
+        int[]    writePos       = new int[actualK];
+        for (int c = 0; c < actualK; c++) {
+            clusterBuffers[c] = new byte[clusterCount[c] * RECORD_SIZE];
+        }
+
+        try (InputStream tmpIn = new BufferedInputStream(Files.newInputStream(tempRecords), 1 << 20)) {
+            byte[] rec = new byte[RECORD_SIZE];
+            for (int i = 0; i < n; i++) {
+                int read = 0;
+                while (read < RECORD_SIZE) read += tmpIn.read(rec, read, RECORD_SIZE - read);
+                int c = assignments[i];
+                System.arraycopy(rec, 0, clusterBuffers[c], writePos[c], RECORD_SIZE);
+                writePos[c] += RECORD_SIZE;
+            }
+        }
 
         try (OutputStream    rawOut = new BufferedOutputStream(Files.newOutputStream(output), 1 << 20);
              DataOutputStream dos   = new DataOutputStream(rawOut)) {
 
             // Header (24 bytes)
-            dos.writeByte(VERSION);          // 1 byte  — versão do formato
-            dos.writeShort(DIMS);            // 2 bytes — dimensões do vetor
-            dos.writeByte(DTYPE_I8);         // 1 byte  — tipo de quantização
-            dos.writeInt(1);                 // 4 bytes — num_clusters (mínimo: 1)
-            dos.writeLong(HEADER_SIZE);      // 8 bytes — offset do diretório de clusters
-            dos.writeLong(dataOffset);       // 8 bytes — offset da área de dados
+            dos.writeByte(VERSION);
+            dos.writeShort(DIMS);
+            dos.writeByte(DTYPE_I8);
+            dos.writeInt(actualK);
+            dos.writeLong(HEADER_SIZE);       // clusterDirOffset = imediatamente após header
+            dos.writeLong(dataOffset);
 
-            // Entrada do cluster único (30 bytes)
-            for (int d = 0; d < DIMS; d++) {
-                dos.writeByte(0);            // centróide = vetor zero (placeholder para Issue 01)
+            // Diretório de clusters (actualK × 30 bytes)
+            for (int c = 0; c < actualK; c++) {
+                dos.write(centroids[c]);                           // centróide int8 (14 bytes)
+                dos.writeFloat(Float.MAX_VALUE);                   // radius (não usado no IVF)
+                dos.writeLong(clusterOffset[c]);                   // offset relativo a dataOffset
+                dos.writeInt(clusterCount[c]);                     // quantidade de registros
             }
-            dos.writeFloat(Float.MAX_VALUE); // raio = máximo (contém todos os vetores)
-            dos.writeLong(0L);               // offset do bloco (0 = começa no data_offset)
-            dos.writeInt(count);             // quantidade de registros neste cluster
 
-            // Flush antes de copiar o temp — DataOutputStream pode ter buffer interno
             dos.flush();
 
-            // Copia os registros do arquivo temporário para o output final
-            Files.copy(tempRecords, rawOut);
+            // Blocos de registros por cluster
+            for (int c = 0; c < actualK; c++) {
+                rawOut.write(clusterBuffers[c]);
+            }
         }
 
         Files.deleteIfExists(tempRecords);
 
-        System.out.printf("[v2-builder] OK: %d registros em %.1fs — %.1f MB%n",
-                count, (System.currentTimeMillis() - t0) / 1000.0,
+        System.out.printf("[v2-builder] OK: %d registros, %d clusters em %.1fs — %.1f MB%n",
+                n, actualK, (System.currentTimeMillis() - t0) / 1000.0,
                 Files.size(output) / (1024.0 * 1024.0));
     }
 
@@ -158,16 +226,13 @@ public final class V2ArtifactBuilder {
      * Regra de quantização:
      *   −1.0f (sentinela de ausência de last_transaction) → −128 (Byte.MIN_VALUE)
      *   demais valores [0, 1]                             → round(v × 127), clamp [−127, 127]
-     *
-     * O sentinela −128 fica fora do domínio de valores normais (que vão até −127),
-     * tornando a ausência detectável no espaço quantizado sem tabela extra.
      */
     static void encodeI8(float[] src, byte[] dst, int dstOffset) {
         for (int d = 0; d < DIMS; d++) {
             float v = src[d];
             byte b;
             if (v == -1.0f) {
-                b = Byte.MIN_VALUE; // sentinela explícito para dimensões sem last_transaction
+                b = Byte.MIN_VALUE;
             } else {
                 int q = Math.round(v * SCALE);
                 if (q < -127) q = -127;

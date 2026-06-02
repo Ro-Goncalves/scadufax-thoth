@@ -4,6 +4,9 @@ services:
     environment:
       - PORT=8080
       - DATA_DIR=/data
+      - NPROBE=8
+      - K_NEIGHBORS=5
+      - FRAUD_THRESHOLD=0.6
     deploy:
       resources:
         limits:
@@ -15,6 +18,9 @@ services:
     environment:
       - PORT=8080
       - DATA_DIR=/data
+      - NPROBE=8
+      - K_NEIGHBORS=5
+      - FRAUD_THRESHOLD=0.6
     deploy:
       resources:
         limits:

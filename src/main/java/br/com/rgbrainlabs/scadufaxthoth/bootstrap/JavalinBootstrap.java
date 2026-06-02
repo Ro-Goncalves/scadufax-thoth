@@ -31,12 +31,16 @@ public final class JavalinBootstrap {
     public Javalin create() throws IOException {
         V2IndexSearcher searcher = new V2IndexSearcher(
                 Path.of(config.v2ArtifactPath()),
-                new EuclideanDistanceCalculator());
-        TransactionVectorizer vectorizer = new TransactionVectorizer(config.normalizationMap(), config.mccRiskMap());
+                new EuclideanDistanceCalculator(),
+                config.nprobe());
+
+        TransactionVectorizer vectorizer = new TransactionVectorizer(
+                config.normalizationMap(), config.mccRiskMap());
 
         WarmupService.warmup(searcher, vectorizer);
 
-        SearchHandler searchHandler = new SearchHandler(searcher, vectorizer);
+        SearchHandler searchHandler = new SearchHandler(
+                searcher, vectorizer, config.kNeighbors(), config.fraudThreshold());
         ReadyHandler readyHandler = new ReadyHandler();
 
         return Javalin.create(javalinConfig -> {
