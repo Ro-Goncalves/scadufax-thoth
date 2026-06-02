@@ -10,24 +10,27 @@ public record AppConfig(
         int port,
         String datasetPath,
         String dataDir,
+        String v2ArtifactPath,
         Map<String, Float> normalizationMap,
         Map<String, Float> mccRiskMap
 ) {
-    private static final String DEFAULT_PORT = "9999";
-    private static final String DEFAULT_DATASET_PATH = "dataset.bin";
-    private static final String DEFAULT_DATA_DIR = "./data";
+    private static final String DEFAULT_PORT            = "9999";
+    private static final String DEFAULT_DATASET_PATH    = "dataset.bin";
+    private static final String DEFAULT_DATA_DIR        = "./data";
+    private static final String DEFAULT_V2_ARTIFACT     = "./data/index.v2";
 
     public static AppConfig fromEnvironment() {
-        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", DEFAULT_PORT));
+        int port          = Integer.parseInt(System.getenv().getOrDefault("PORT", DEFAULT_PORT));
         String datasetPath = System.getenv().getOrDefault("DATASET_PATH", DEFAULT_DATASET_PATH);
-        String dataDir = System.getenv().getOrDefault("DATA_DIR", DEFAULT_DATA_DIR);
+        String dataDir    = System.getenv().getOrDefault("DATA_DIR", DEFAULT_DATA_DIR);
+        String v2Path     = System.getenv().getOrDefault("V2_ARTIFACT_PATH", DEFAULT_V2_ARTIFACT);
 
         ObjectMapper bootMapper = new ObjectMapper();
 
         Map<String, Float> normMap = loadMapFromJar(bootMapper, "/normalization.json");
         Map<String, Float> mccMap = loadMapFromJar(bootMapper, "/mcc_risk.json");
 
-        return new AppConfig(port, datasetPath, dataDir, normMap, mccMap);
+        return new AppConfig(port, datasetPath, dataDir, v2Path, normMap, mccMap);
     }
 
     private static Map<String, Float> loadMapFromJar(ObjectMapper mapper, String resourcePath) {        

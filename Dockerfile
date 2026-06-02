@@ -12,11 +12,10 @@ RUN mvn -q -B -DskipTests package
 ADD https://github.com/zanfranceschi/rinha-de-backend-2026/raw/main/resources/references.json.gz \
     /build/src/main/resources/references.json.gz
 
-# Gera os artefatos quantizados — somente int8.
-# Para mudar para int16: trocar --types i8 por --types i16.
+# Gera o artefato binário V2 (arquivo único: header + cluster + registros).
 RUN java -Xmx256m -cp target/scadufax-thoth.jar \
-    br.com.rgbrainlabs.scadufaxthoth.prep.QuantizedDatasetBuilder \
-    src/main/resources/references.json.gz /build/data --types i8
+    br.com.rgbrainlabs.scadufaxthoth.prep.V2ArtifactBuilder \
+    src/main/resources/references.json.gz /build/data/index.v2
 
 # Estágio 2: Runtime
 FROM eclipse-temurin:25-jre-jammy
@@ -30,7 +29,7 @@ COPY --from=build /build/data /data
 #   -XX:+UseSerialGC  : GC mais leve para workloads single-core/low-memory.
 ENV JAVA_OPTS="-Xms50m -Xmx80m -XX:+UseSerialGC -XX:MaxDirectMemorySize=10m --enable-native-access=ALL-UNNAMED"
 
-ENV DATA_DIR=/data
+ENV V2_ARTIFACT_PATH=/data/index.v2
 
 EXPOSE 8080
 

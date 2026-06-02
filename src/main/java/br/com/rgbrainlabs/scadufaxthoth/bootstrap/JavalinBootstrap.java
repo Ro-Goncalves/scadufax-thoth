@@ -1,10 +1,9 @@
 package br.com.rgbrainlabs.scadufaxthoth.bootstrap;
 
 import br.com.rgbrainlabs.scadufaxthoth.config.AppConfig;
-import br.com.rgbrainlabs.scadufaxthoth.search.DistanceCalculator;
 import br.com.rgbrainlabs.scadufaxthoth.search.EuclideanDistanceCalculator;
-import br.com.rgbrainlabs.scadufaxthoth.search.QuantizedBruteForceSearcher;
 import br.com.rgbrainlabs.scadufaxthoth.search.TransactionVectorizer;
+import br.com.rgbrainlabs.scadufaxthoth.search.V2IndexSearcher;
 import br.com.rgbrainlabs.scadufaxthoth.web.ReadyHandler;
 import br.com.rgbrainlabs.scadufaxthoth.web.SearchHandler;
 
@@ -30,11 +29,9 @@ public final class JavalinBootstrap {
     }
 
     public Javalin create() throws IOException {
-        DistanceCalculator calculator = new EuclideanDistanceCalculator();
-        QuantizedBruteForceSearcher searcher = new QuantizedBruteForceSearcher(
-                Path.of(config.dataDir()),
-                QuantizedBruteForceSearcher.Dtype.I8,
-                calculator);
+        V2IndexSearcher searcher = new V2IndexSearcher(
+                Path.of(config.v2ArtifactPath()),
+                new EuclideanDistanceCalculator());
         TransactionVectorizer vectorizer = new TransactionVectorizer(config.normalizationMap(), config.mccRiskMap());
 
         WarmupService.warmup(searcher, vectorizer);
