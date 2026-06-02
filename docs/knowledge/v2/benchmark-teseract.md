@@ -80,3 +80,44 @@
   data_received..................: 945 B  390 B/s
   data_sent......................: 2.9 kB 1.2 kB/s
 ```
+
+### V2IndexSearcher
+
+```
+█ THRESHOLDS 
+
+  checks
+  ✓ 'rate==1.0' rate=100.00%
+
+  http_req_failed
+  ✓ 'rate==0.0' rate=0.00%
+
+
+█ TOTAL RESULTS 
+
+  checks_total.......: 20      14.441949/s
+  checks_succeeded...: 100.00% 20 out of 20
+  checks_failed......: 0.00%   0 out of 20
+
+  ✓ status is 200
+  ✓ body is json
+  ✓ approved is boolean
+  ✓ fraud_score is number
+
+  HTTP
+  http_req_duration..............: avg=269.82ms min=31.18ms med=265.66ms max=573.91ms p(90)=522.65ms p(95)=548.28ms
+    { expected_response:true }...: avg=269.82ms min=31.18ms med=265.66ms max=573.91ms p(90)=522.65ms p(95)=548.28ms
+  http_req_failed................: 0.00%  0 out of 5
+  http_reqs......................: 5      3.610487/s
+
+  EXECUTION
+  iteration_duration.............: avg=276.92ms min=31.38ms med=265.83ms max=608.66ms p(90)=543.59ms p(95)=576.12ms
+  iterations.....................: 5      3.610487/s
+  vus............................: 1      min=1      max=1
+  vus_max........................: 1      min=1      max=1
+
+  NETWORK
+  data_received..................: 945 B  682 B/s
+  data_sent......................: 2.9 kB 2.1 kB/s
+k6-smoke-1  |
+```
