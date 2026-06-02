@@ -28,8 +28,8 @@ A escolha final deve respeitar não apenas a complexidade assintótica, mas prin
 A arquitetura alvo evolui para o modelo IVF aliado a técnicas de quantização e métricas de distância otimizadas para CPU. Contudo, a primeira implementação funcional adotará busca exata por força bruta, com k-NN e distância euclidiana, para maximizar aderência à especificação e simplificar a validação inicial do pipeline.
 
 * **Baseline inicial:** A primeira entrega deve usar brute force com k-NN exato e distância euclidiana. A escolha existe para reduzir variáveis, facilitar a comparação com a regra oficial e garantir uma referência de corretude antes de qualquer aproximação.
-* **Particionamento:** Em uma fase posterior, a base de 3 milhões de vetores deve ser dividida em partições (ex: 1.000 clusters) através de algoritmos como K-Means. A busca em tempo de requisição ocorrerá apenas dentro da partição mais próxima, reduzindo o escopo de comparação para cerca de 3.000 vetores. Como eixo de otimização, o número de partições (`K`) e a quantidade de partições visitadas por busca (`nprobe`) devem ser tratados como parâmetros experimentais.
-* **Quantização (int8):** Os valores dimensionais normalizados entre `0.0` e `1.0` devem ser convertidos para inteiros de 1 byte (multiplicação por 255). Esta técnica reduz o consumo de memória de ~168 MB para ~42 MB, criando folga operacional para o Garbage Collector. É recomendável testar abordagens de quantização com pesos dinâmicos por dimensão e manter uma implementação sem quantização (`float32`) apenas como baseline de acurácia.
+* **Particionamento:** Em uma fase posterior, a base de 3 milhões de vetores deve ser dividida em partições através de algoritmos como K-Means. A busca em tempo de requisição ocorrerá apenas nas partições mais promissoras, reduzindo drasticamente o escopo de comparação. Como eixo de otimização, o número de partições (`K`) e a quantidade de partições visitadas por busca (`nprobe`) devem ser tratados como parâmetros experimentais. A primeira varredura operacional deve avaliar combinações como `K = 256`, `512` e `1024`, com `nprobe = 1`, `2` e `4`.
+* **Quantização (int8):** Os valores dimensionais normalizados entre `0.0` e `1.0` devem ser convertidos para inteiros de 1 byte usando a faixa `0..127`. O valor `-128` deve ser reservado como sentinela para dimensões especiais, como ausência de `last_transaction`. O payload vetorial cai para cerca de ~42 MB, e o artefato completo permanece na casa de dezenas baixas de megabytes mesmo com rótulo binário e metadados de cluster, criando folga operacional para o Garbage Collector. É recomendável testar abordagens de quantização com pesos dinâmicos por dimensão e manter uma implementação sem quantização (`float32`) apenas como baseline de acurácia.
 * **Métrica de Distância:** A baseline inicial adotará distância euclidiana (L2), por ser a forma mais direta de implementar o k-NN exato e a referência mais segura para validação de corretude. A distância Euclidiana exige operações custosas de multiplicação e raiz quadrada:
 
 $$\text{dist}(q, r) = \sum_{i=1}^{14} (q_i - r_i)^2$$
@@ -63,9 +63,21 @@ O processamento do arquivo estrutural `.json.gz` não deve ocorrer durante a ini
 * Responsável inicialmente pela leitura do JSON e pela preparação dos dados para a baseline exata. Em fases posteriores, passa a assumir também normalização persistida, quantização e agrupamento dos vetores para IVF.
 * Gera como artefato final um arquivo binário customizado (`dataset.bin`), estruturado puramente em bytes.
 
-#### Pendência em Aberto: Formato do Artefato Binário
+#### Formato do Artefato Binário
 
-O layout inicial de `dataset.bin` ainda não foi definido. A decisão sobre cabeçalho, offsets, serialização de labels, ordenação dos vetores e estratégia de leitura em memória fica explicitamente postergada para o momento em que a implementação do pré-processador começar. A razão é simples: essa decisão depende do desenho concreto do pipeline de build e das primeiras medições do baseline, e ainda não foi estudada o suficiente para ser fixada com segurança.
+O layout do `dataset.bin` passa a ser uma decisão fechada da arquitetura de evolução para IVF.
+
+* **Header fixo:** versão, quantidade de dimensões, modo de quantização, quantidade de clusters e offsets das tabelas internas.
+* **Diretório de clusters:** centróide do cluster, raio máximo, offset inicial do bloco e quantidade de vetores daquele bloco.
+* **Blocos de vetores:** registros de tamanho fixo, sem `String` e sem dimensão serializada por item.
+
+Cada registro persistido deve conter:
+
+* `1 byte` de rótulo binário (`0 = legit`, `1 = fraud`);
+* `14 bytes` do vetor quantizado;
+* `1 byte` reservado para alinhamento e evolução futura.
+
+Com isso, o artefato passa a privilegiar salto por offset, leitura sequencial enxuta e custo mínimo de parsing no runtime.
 
 **Fase B: Execução (Runtime)**
 
