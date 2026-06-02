@@ -119,5 +119,46 @@
   NETWORK
   data_received..................: 945 B  682 B/s
   data_sent......................: 2.9 kB 2.1 kB/s
-k6-smoke-1  |
+```
+
+### Clusterização
+
+```
+
+█ THRESHOLDS 
+
+  checks
+  ✓ 'rate==1.0' rate=100.00%
+
+  http_req_failed
+  ✓ 'rate==0.0' rate=0.00%
+
+
+█ TOTAL RESULTS 
+
+  checks_total.......: 20      15.417195/s
+  checks_succeeded...: 100.00% 20 out of 20
+  checks_failed......: 0.00%   0 out of 20
+
+  ✓ status is 200
+  ✓ body is json
+  ✓ approved is boolean
+  ✓ fraud_score is number
+
+  HTTP
+  http_req_duration..............: avg=257.04ms min=4.53ms med=93.91ms max=607.63ms p(90)=593.89ms p(95)=600.76ms
+    { expected_response:true }...: avg=257.04ms min=4.53ms med=93.91ms max=607.63ms p(90)=593.89ms p(95)=600.76ms
+  http_req_failed................: 0.00%  0 out of 5
+  http_reqs......................: 5      3.854299/s
+
+  EXECUTION
+  iteration_duration.............: avg=259.26ms min=4.76ms med=94.23ms max=617.73ms p(90)=600.05ms p(95)=608.89ms
+  iterations.....................: 5      3.854299/s
+  vus............................: 1      min=1      max=1
+  vus_max........................: 1      min=1      max=1
+
+  NETWORK
+  data_received..................: 945 B  729 B/s
+  data_sent......................: 2.9 kB 2.2 kB/s
+
 ```
