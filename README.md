@@ -26,16 +26,59 @@ Construir uma API de detecção de fraude por busca vetorial, aderente às regra
 
 As decisões de arquitetura, escolhas de stack, trade-offs de performance e pendências técnicas ficam centralizadas em [docs/knowledge/scadufax-thoth.md](docs/knowledge/scadufax-thoth.md).
 
-## Como este repositório será usado
+## Como executar o teste local
 
-* Implementação da API e do pipeline de pré-processamento.
-* Registro das decisões técnicas e das justificativas de arquitetura.
-* Comparação entre experimentos de performance, memória e qualidade de detecção.
-* Base pública de portfólio do processo técnico adotado no projeto.
+O fluxo local usa dois passos separados: primeiro gera os artefatos no filesystem do projeto; depois sobe a aplicação com volumes montados para o benchmark usar esses arquivos sem rebuild da imagem.
 
-## Próximos passos
+### 1. Gerar os datasets localmente
 
-1. Estruturar a aplicação Java 25 com Javalin.
-2. Implementar `GET /ready` e o esqueleto de `POST /fraud-score`.
-3. Criar o pipeline inicial de normalização e vetorização.
-4. Preparar a primeira rodada de validação local com os testes disponíveis em [test](test).
+Para reproduzir o cenário completo de validação, gere float32, int8 e int16:
+
+```bash
+./build-datasets.sh --types all
+```
+
+Se quiser espelhar o cenário da rinha, gere apenas o artefato que sobe no container de produção:
+
+```bash
+./build-datasets.sh --types i8
+```
+
+Esse comando cria:
+
+- `dataset.bin` com a representação float32 usada pelo benchmark de comparação.
+- `data/` com os artefatos quantizados e os metadados usados pela API em runtime e pelo benchmark.
+
+### 2. Buildar a imagem usada no teste local
+
+```bash
+docker build -t scadufax-thoth:bench .
+```
+
+### 3. Subir a stack local com os volumes montados
+
+```bash
+docker compose -f docker-compose.local.yml up
+```
+
+Esse compose monta `dataset.bin`, `data/` e `test/` diretamente do disco. Em runtime HTTP, a API usa os artefatos quantizados em `data/`; o `dataset.bin` fica disponível para o benchmark comparar float32, int8 e int16 no mesmo ambiente.
+
+No modo de produção em `docker-compose.yml`, a stack sobe apenas com `DATA_DIR=/data`, sem depender de `DATASET_PATH`.
+
+### 4. Executar o benchmark de quantização
+
+Em outro terminal, rode:
+
+```bash
+docker compose -f docker-compose.local.yml run --rm api01 \
+	java -cp /app/api.jar br.com.rgbrainlabs.scadufaxthoth.benchmark.QuantizationBenchmark
+```
+
+O benchmark compara `float32`, `int8` e `int16` no mesmo conjunto de queries e imprime recall@5, divergência e latência por percentil.
+
+## Como executar testes com o k6
+
+docker compose up --build -d
+
+docker compose --profile smoke up k6-smoke
+

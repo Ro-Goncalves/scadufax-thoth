@@ -1,0 +1,43 @@
+# docker-compose.local.yml — modo local para testes e benchmark.
+#
+# Usa os datasets gerados por build-datasets.sh como volumes externos,
+# evitando rebuild da imagem Docker a cada mudança de dataset.
+#
+# Pré-requisito:
+#   1. Ter rodado: ./build-datasets.sh --types all
+#   2. Ter buildado a imagem: docker build -t scadufax-thoth:bench .
+#
+# Uso:
+#   docker compose -f docker-compose.local.yml up
+#
+# Para rodar o benchmark:
+#   docker compose -f docker-compose.local.yml run --rm api01 \
+#     java -cp /app/api.jar br.com.rgbrainlabs.scadufaxthoth.benchmark.QuantizationBenchmark
+#
+# Este arquivo NÃO é usado na rinha — veja docker-compose.yml para o modo de produção.
+services:
+  api01:
+    image: scadufax-thoth:bench
+    volumes:
+      - ./dataset.bin:/app/dataset.bin:ro
+      - ./data:/data:ro
+      - ./test:/app/test:ro
+    environment:
+      - PORT=8080
+      - DATASET_PATH=/app/dataset.bin
+      - DATA_DIR=/data
+    ports:
+      - "9999:8080"
+
+  api02:
+    image: scadufax-thoth:bench
+    volumes:
+      - ./dataset.bin:/app/dataset.bin:ro
+      - ./data:/data:ro
+      - ./test:/app/test:ro
+    environment:
+      - PORT=8080
+      - DATASET_PATH=/app/dataset.bin
+      - DATA_DIR=/data
+    ports:
+      - "9998:8080"
