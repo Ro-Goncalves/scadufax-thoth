@@ -9,25 +9,40 @@ import java.util.Map;
 public record AppConfig(
         int port,
         String datasetPath,
+        String dataDir,
+        String v2ArtifactPath,
         Map<String, Float> normalizationMap,
-        Map<String, Float> mccRiskMap
+        Map<String, Float> mccRiskMap,
+        int    nprobe,
+        int    kNeighbors,
+        double fraudThreshold
 ) {
-    private static final String DEFAULT_PORT = "9999";
-    private static final String DEFAULT_DATASET_PATH = "dataset.bin";
+    private static final String DEFAULT_PORT             = "9999";
+    private static final String DEFAULT_DATASET_PATH     = "dataset.bin";
+    private static final String DEFAULT_DATA_DIR         = "./data";
+    private static final String DEFAULT_V2_ARTIFACT      = "./data/index.v2";
+    private static final String DEFAULT_NPROBE           = "8";
+    private static final String DEFAULT_K_NEIGHBORS      = "5";
+    private static final String DEFAULT_FRAUD_THRESHOLD  = "0.6";
 
     public static AppConfig fromEnvironment() {
-        int port = Integer.parseInt(System.getenv().getOrDefault("PORT", DEFAULT_PORT));
-        String datasetPath = System.getenv().getOrDefault("DATASET_PATH", DEFAULT_DATASET_PATH);
-       
+        int    port           = Integer.parseInt(System.getenv().getOrDefault("PORT",             DEFAULT_PORT));
+        String datasetPath    = System.getenv().getOrDefault("DATASET_PATH",   DEFAULT_DATASET_PATH);
+        String dataDir        = System.getenv().getOrDefault("DATA_DIR",        DEFAULT_DATA_DIR);
+        String v2Path         = System.getenv().getOrDefault("V2_ARTIFACT_PATH", DEFAULT_V2_ARTIFACT);
+        int    nprobe         = Integer.parseInt(System.getenv().getOrDefault("NPROBE",           DEFAULT_NPROBE));
+        int    kNeighbors     = Integer.parseInt(System.getenv().getOrDefault("K_NEIGHBORS",      DEFAULT_K_NEIGHBORS));
+        double fraudThreshold = Double.parseDouble(System.getenv().getOrDefault("FRAUD_THRESHOLD", DEFAULT_FRAUD_THRESHOLD));
+
         ObjectMapper bootMapper = new ObjectMapper();
-
         Map<String, Float> normMap = loadMapFromJar(bootMapper, "/normalization.json");
-        Map<String, Float> mccMap = loadMapFromJar(bootMapper, "/mcc_risk.json");
+        Map<String, Float> mccMap  = loadMapFromJar(bootMapper, "/mcc_risk.json");
 
-        return new AppConfig(port, datasetPath, normMap, mccMap);
+        return new AppConfig(port, datasetPath, dataDir, v2Path, normMap, mccMap,
+                             nprobe, kNeighbors, fraudThreshold);
     }
 
-    private static Map<String, Float> loadMapFromJar(ObjectMapper mapper, String resourcePath) {        
+    private static Map<String, Float> loadMapFromJar(ObjectMapper mapper, String resourcePath) {
         try (InputStream is = AppConfig.class.getResourceAsStream(resourcePath)) {
             if (is == null) {
                 throw new IllegalArgumentException("Arquivo não encontrado no JAR: " + resourcePath);

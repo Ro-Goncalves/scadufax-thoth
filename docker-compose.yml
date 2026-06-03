@@ -3,9 +3,10 @@ services:
     build: .
     environment:
       - PORT=8080
-      - DATASET_PATH=/app/dataset.bin
-    volumes:
-      - ./dataset.bin:/app/dataset.bin:ro # Monta como Read-Only
+      - DATA_DIR=/data
+      - NPROBE=${NPROBE:-8}
+      - K_NEIGHBORS=${K_NEIGHBORS:-5}
+      - FRAUD_THRESHOLD=${FRAUD_THRESHOLD:-0.6}
     deploy:
       resources:
         limits:
@@ -16,9 +17,10 @@ services:
     build: .
     environment:
       - PORT=8080
-      - DATASET_PATH=/app/dataset.bin
-    volumes:
-      - ./dataset.bin:/app/dataset.bin:ro
+      - DATA_DIR=/data
+      - NPROBE=${NPROBE:-8}
+      - K_NEIGHBORS=${K_NEIGHBORS:-5}
+      - FRAUD_THRESHOLD=${FRAUD_THRESHOLD:-0.6}
     deploy:
       resources:
         limits:

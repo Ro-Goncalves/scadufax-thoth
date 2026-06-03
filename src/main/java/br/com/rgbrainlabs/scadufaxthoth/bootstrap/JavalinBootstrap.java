@@ -1,11 +1,9 @@
 package br.com.rgbrainlabs.scadufaxthoth.bootstrap;
 
 import br.com.rgbrainlabs.scadufaxthoth.config.AppConfig;
-import br.com.rgbrainlabs.scadufaxthoth.search.DistanceCalculator;
 import br.com.rgbrainlabs.scadufaxthoth.search.EuclideanDistanceCalculator;
-import br.com.rgbrainlabs.scadufaxthoth.search.MmapBruteForceSearcher;
 import br.com.rgbrainlabs.scadufaxthoth.search.TransactionVectorizer;
-import br.com.rgbrainlabs.scadufaxthoth.search.VectorSearcher;
+import br.com.rgbrainlabs.scadufaxthoth.search.V2IndexSearcher;
 import br.com.rgbrainlabs.scadufaxthoth.web.ReadyHandler;
 import br.com.rgbrainlabs.scadufaxthoth.web.SearchHandler;
 
@@ -15,7 +13,8 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import io.javalin.Javalin;
 import io.javalin.json.JavalinJackson;
 
-import java.lang.foreign.Arena;
+import java.io.IOException;
+import java.nio.file.Path;
 
 public final class JavalinBootstrap {
 
@@ -25,23 +24,29 @@ public final class JavalinBootstrap {
         this.config = config;
     }
 
-    public Javalin start() throws Exception {
+    public Javalin start() throws IOException {
         return create().start(config.port());
     }
 
-    public Javalin create() throws Exception {
+    public Javalin create() throws IOException {
+        V2IndexSearcher searcher = new V2IndexSearcher(
+                Path.of(config.v2ArtifactPath()),
+                new EuclideanDistanceCalculator(),
+                config.nprobe());
 
-        Arena globalArena = Arena.ofShared();
-        DistanceCalculator calculator = new EuclideanDistanceCalculator();
-        VectorSearcher searcher = new MmapBruteForceSearcher(config.datasetPath(), globalArena, calculator);
-        TransactionVectorizer vectorizer = new TransactionVectorizer(config.normalizationMap(), config.mccRiskMap());
-        
-        SearchHandler searchHandler = new SearchHandler(searcher, vectorizer);
+        TransactionVectorizer vectorizer = new TransactionVectorizer(
+                config.normalizationMap(), config.mccRiskMap());
+
+        WarmupService.warmup(searcher, vectorizer);
+
+        SearchHandler searchHandler = new SearchHandler(
+                searcher, vectorizer, config.kNeighbors(), config.fraudThreshold());
         ReadyHandler readyHandler = new ReadyHandler();
 
         return Javalin.create(javalinConfig -> {
             javalinConfig.concurrency.useVirtualThreads = true;
             javalinConfig.startup.showJavalinBanner = false;
+            javalinConfig.events.serverStopped(searcher::close);
 
             javalinConfig.jsonMapper(new JavalinJackson().updateMapper(mapper -> {
                 mapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);

@@ -15,10 +15,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class EuclideanDistanceCalculatorTest {
 
-    // A mesma constante usada na classe principal para garantir a ordem dos bytes
-    private static final ValueLayout.OfFloat JAVA_FLOAT_BE = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.BIG_ENDIAN);
-    
-    // A instância que vamos testar
+    private static final ValueLayout.OfFloat  JAVA_FLOAT_BE          = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.BIG_ENDIAN);
+    private static final ValueLayout.OfShort JAVA_SHORT_LE_UNALIGNED = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+
     private final EuclideanDistanceCalculator calculator = new EuclideanDistanceCalculator();
 
     @ParameterizedTest(name = "[{index}] {0}")
@@ -49,6 +48,60 @@ class EuclideanDistanceCalculatorTest {
             assertEquals(expectedSquaredDistance, actualDistance, 0.0001, 
                     "Falha no cenário: " + description);
         }
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("provideI8TestCases")
+    @DisplayName("Deve calcular distância euclidiana ao quadrado para int8")
+    void testCalculateI8(String description, byte[] query, byte[] stored, double expected) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment segment = arena.allocate(stored.length);
+            for (int i = 0; i < stored.length; i++) {
+                segment.set(ValueLayout.JAVA_BYTE, i, stored[i]);
+            }
+            double actual = calculator.calculateI8(query, segment, 0, stored.length);
+            assertEquals(expected, actual, 0.0, description);
+        }
+    }
+
+    private static Stream<Arguments> provideI8TestCases() {
+        return Stream.of(
+            Arguments.of("Distância para si mesmo",
+                new byte[]{0, 25, 51}, new byte[]{0, 25, 51}, 0.0),
+            Arguments.of("Vetor zero vs máximo positivo",
+                new byte[]{0, 0}, new byte[]{127, 0}, 16129.0),        // 127² = 16129
+            Arguments.of("Sentinela -127 preservado",
+                new byte[]{-127, 0}, new byte[]{-127, 0}, 0.0),
+            Arguments.of("Diferença cruzada máxima",
+                new byte[]{127, -127}, new byte[]{-127, 127}, 129032.0) // 2 × 254² = 129032
+        );
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("provideI16TestCases")
+    @DisplayName("Deve calcular distância euclidiana ao quadrado para int16")
+    void testCalculateI16(String description, short[] query, short[] stored, double expected) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment segment = arena.allocate((long) stored.length * 2);
+            for (int i = 0; i < stored.length; i++) {
+                segment.set(JAVA_SHORT_LE_UNALIGNED, (long) i * 2, stored[i]);
+            }
+            double actual = calculator.calculateI16(query, segment, 0, stored.length);
+            assertEquals(expected, actual, 0.0, description);
+        }
+    }
+
+    private static Stream<Arguments> provideI16TestCases() {
+        return Stream.of(
+            Arguments.of("Distância para si mesmo",
+                new short[]{0, 10000}, new short[]{0, 10000}, 0.0),
+            Arguments.of("Vetor zero vs máximo positivo",
+                new short[]{0}, new short[]{10000}, 100_000_000.0),     // 10000² = 100_000_000
+            Arguments.of("Sentinela -10000 preservado",
+                new short[]{-10000}, new short[]{-10000}, 0.0),
+            Arguments.of("Diferença cruzada máxima i16",
+                new short[]{10000, -10000}, new short[]{-10000, 10000}, 800_000_000.0) // 2 × 20000²
+        );
     }
 
     /**
