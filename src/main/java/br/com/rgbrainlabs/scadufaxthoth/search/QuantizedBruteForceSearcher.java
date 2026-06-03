@@ -9,10 +9,8 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
-import java.util.PriorityQueue;
 
 /**
  * Buscador força-bruta sobre vetores quantizados (int8 ou int16).
@@ -93,28 +91,28 @@ public final class QuantizedBruteForceSearcher implements VectorSearcher, AutoCl
 
     @Override
     public List<SearchResult> search(float[] queryVector, int k) {
-        PriorityQueue<SearchResult> pq = new PriorityQueue<>(k);
+        TopKSelector selector = new TopKSelector(k);
         if (dtype == Dtype.I8) {
-            searchI8(queryVector, k, pq);
+            searchI8(queryVector, selector);
         } else {
-            searchI16(queryVector, k, pq);
+            searchI16(queryVector, selector);
         }
-        List<SearchResult> results = new ArrayList<>(pq);
-        results.sort((a, b) -> Double.compare(a.distance(), b.distance()));
-        return results;
+        return selector.materialize();
     }
 
-    private void searchI8(float[] queryVector, int k, PriorityQueue<SearchResult> pq) {
+    private void searchI8(float[] queryVector, TopKSelector selector) {
         byte[] q = quantizeI8(queryVector);
         for (int i = 0; i < count; i++) {
-            insert(pq, i, calculator.calculateI8(q, vectors, i * (long) DIMS, DIMS), k);
+            double dist = calculator.calculateI8(q, vectors, i * (long) DIMS, DIMS);
+            selector.tryInsert(dist, labels.get(i) ? (byte) 1 : (byte) 0);
         }
     }
 
-    private void searchI16(float[] queryVector, int k, PriorityQueue<SearchResult> pq) {
+    private void searchI16(float[] queryVector, TopKSelector selector) {
         short[] q = quantizeI16(queryVector);
         for (int i = 0; i < count; i++) {
-            insert(pq, i, calculator.calculateI16(q, vectors, i * DIMS * 2L, DIMS), k);
+            double dist = calculator.calculateI16(q, vectors, i * DIMS * 2L, DIMS);
+            selector.tryInsert(dist, labels.get(i) ? (byte) 1 : (byte) 0);
         }
     }
 
@@ -122,16 +120,6 @@ public final class QuantizedBruteForceSearcher implements VectorSearcher, AutoCl
     public void close() {
         if (ownsArena) {
             arena.close();
-        }
-    }
-
-    private void insert(PriorityQueue<SearchResult> pq, int idx, double dist, int k) {
-        String label = labels.get(idx) ? "fraud" : "legitimate";
-        if (pq.size() < k) {
-            pq.offer(new SearchResult(label, dist));
-        } else if (dist < pq.peek().distance()) {
-            pq.poll();
-            pq.offer(new SearchResult(label, dist));
         }
     }
 

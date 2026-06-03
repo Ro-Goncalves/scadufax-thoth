@@ -17,17 +17,25 @@ YELLOW='\033[33m'
 RED='\033[31m'
 RESET='\033[0m'
 
-# Coleta dados de todos os results.json
+# Coleta dados: aggregate.json enriquecido > results_run*.json > results.json (legado)
 collect_rows() {
   for dir in "$RESULTS_DIR"/K*/; do
-    local json="$dir/results.json"
-    [[ -f "$json" ]] || continue
-
     local name
     name=$(basename "$dir")
     local K nprobe
     K=$(echo "$name" | grep -oP 'K\K[0-9]+')
     nprobe=$(echo "$name" | grep -oP 'nprobe\K[0-9]+')
+
+    local json=""
+    if [[ -f "$dir/aggregate.json" ]] && jq -e '.scoring.breakdown' "$dir/aggregate.json" >/dev/null 2>&1; then
+      json="$dir/aggregate.json"
+    else
+      for f in "$dir"/results_run*.json; do
+        [[ -f "$f" ]] && json="$f" && break
+      done
+      [[ -z "$json" && -f "$dir/results.json" ]] && json="$dir/results.json"
+    fi
+    [[ -z "$json" ]] && continue
 
     jq -r --arg K "$K" --arg nprobe "$nprobe" '
       .scoring as $s |
@@ -51,15 +59,19 @@ collect_rows() {
       (if ($s.p99_score.cut_triggered        // false) then "Y" else "N" end) as $cut_p99 |
       (if ($s.detection_score.cut_triggered  // false) then "Y" else "N" end) as $cut_det |
 
+      # p99: prefere string .p99 (presente em results_run*.json e aggregate enriquecido),
+      # depois calcula de .p99_ms.median (aggregate antigo)
+      (.p99 // (if .p99_ms.median then (.p99_ms.median | tostring) + "ms" else "N/A" end)) as $p99_disp |
+
       [$K,
        $nprobe,
-       .p99,
-       ($s.p99_score.value      | . * 100 | round | . / 100 | tostring),
-       ($s.detection_score.value| . * 100 | round | . / 100 | tostring),
-       ($s.final_score           | . * 100 | round | . / 100 | tostring),
-       ($b.false_positive_detections | tostring),
-       ($b.false_negative_detections | tostring),
-       $s.failure_rate,
+       $p99_disp,
+       (($s.p99_score.value       // 0) | . * 100 | round | . / 100 | tostring),
+       (($s.detection_score.value // 0) | . * 100 | round | . / 100 | tostring),
+       (($s.final_score            // 0) | . * 100 | round | . / 100 | tostring),
+       ($fp | tostring),
+       ($fn | tostring),
+       ($s.failure_rate // "N/A"),
        ($recall   * 100 | . * 100 | round | . / 100 | tostring),
        ($precision* 100 | . * 100 | round | . / 100 | tostring),
        ($f1       * 100 | . * 100 | round | . / 100 | tostring),

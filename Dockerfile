@@ -13,7 +13,7 @@ ADD https://github.com/zanfranceschi/rinha-de-backend-2026/raw/main/resources/re
     /build/src/main/resources/references.json.gz
 
 # Parâmetros de build do K-means (variáveis para experimentos sem recompilar)
-ARG NUM_CLUSTERS=256
+ARG NUM_CLUSTERS=1024
 ARG KMEANS_ITERATIONS=20
 ARG KMEANS_SEED=42
 

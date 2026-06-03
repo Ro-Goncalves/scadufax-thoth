@@ -11,10 +11,8 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.PriorityQueue;
 
 /**
  * Buscador IVF (Inverted File Index) sobre o artefato binário V2.
@@ -40,6 +38,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     private static final int DIMS = V2ArtifactBuilder.DIMS;
     private static final int SCALE = V2ArtifactBuilder.SCALE;
     private static final int RECORD_SIZE = V2ArtifactBuilder.RECORD_SIZE;
+
+    private static volatile long PREWARM_SINK = 0;
 
     private final int numClusters;
     private final int nprobe;
@@ -81,7 +81,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         // Ordena clusters por distância crescente ao centróide
         int[] ranked = rankClusters(q);
 
-        PriorityQueue<SearchResult> pq = new PriorityQueue<>(k);
+        TopKSelector selector = new TopKSelector(k);
         int probes = Math.min(nprobe, numClusters);
 
         for (int ci = 0; ci < probes; ci++) {
@@ -91,30 +91,51 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
             for (int i = 0; i < blockCount; i++) {
                 long recordBase = blockStart + (long) i * RECORD_SIZE;
-               
                 double dist = calculator.calculateI8(q, file, recordBase + 1, DIMS);
-               
-                if (pq.size() < k) {
-                    byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
-                    String label = labelByte == 1 ? "fraud" : "legitimate";
-                    pq.offer(new SearchResult(label, dist));
-                } else if (dist < pq.peek().distance()) {
-                    byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
-                    String label = labelByte == 1 ? "fraud" : "legitimate";
-                    pq.poll();
-                    pq.offer(new SearchResult(label, dist));
-                }
+                byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+                selector.tryInsert(dist, labelByte);
             }
         }
 
-        List<SearchResult> results = new ArrayList<>(pq);
-        results.sort((a, b) -> Double.compare(a.distance(), b.distance()));
-        return results;
+        return selector.materialize();
     }
 
     @Override
     public void close() {
         arena.close();
+    }
+
+    /**
+     * Toca um byte a cada 4KB do MemorySegment mapeado, faltando todas as páginas
+     * na tabela de páginas do processo antes do /ready abrir.
+     *
+     * Por que tocar o próprio MemorySegment (não um FileChannel à parte)?
+     * Um FileChannel separado aquece apenas o page cache do SO. O mmap ainda
+     * sofreria um soft fault na tabela de páginas do processo na primeira busca.
+     * Tocar o mesmo segmento que o hot path usa elimina os dois overheads.
+     *
+     * Por que PREWARM_SINK volatile? O JIT detectaria que os bytes lidos não
+     * produzem efeito observável e eliminaria o laço (dead-code elimination).
+     * O volatile força a JVM a de fato ler e gravar, impedindo essa otimização.
+     *
+     * @return número de acessos realizados — útil para testes de cobertura
+     */
+    public long prewarm() {
+        long t0 = System.currentTimeMillis();
+        long size = file.byteSize();
+        long sink = 0;
+        long accesses = 0;
+        for (long off = 0; off < size; off += 4096) {
+            sink += file.get(ValueLayout.JAVA_BYTE, off);
+            accesses++;
+        }
+        if (size > 0 && (size % 4096) != 0) {
+            sink += file.get(ValueLayout.JAVA_BYTE, size - 1);
+        }
+        PREWARM_SINK = sink;
+        System.out.printf("[prewarm] %d páginas tocadas em %d ms%n",
+                accesses, System.currentTimeMillis() - t0);
+        return accesses;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────

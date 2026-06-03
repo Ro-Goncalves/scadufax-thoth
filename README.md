@@ -81,4 +81,7 @@ O benchmark compara `float32`, `int8` e `int16` no mesmo conjunto de queries e i
 docker compose up --build -d
 
 docker compose --profile smoke up k6-smoke
+cd ./test/ &&  docker compose --profile test up k6
+
+K_VALUES="1024" NPROBE_VALUES="4" RUNS=5 ./run-benchmark.sh
 
