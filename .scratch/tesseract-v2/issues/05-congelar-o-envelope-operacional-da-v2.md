@@ -1,6 +1,6 @@
 # Issue 05: Congelar o envelope operacional da V2
 
-Status: ready-for-human
+Status: done
 Tipo: HITL
 
 ## O que construir
@@ -11,9 +11,9 @@ O objetivo é transformar os resultados técnicos em uma decisão explícita de 
 
 ## Critérios de aceite
 
-- [ ] Existe uma decisão explícita sobre a configuração padrão de K e nprobe que seguirá para a V2.
-- [ ] Existe uma decisão explícita sobre manter o caminho em int8 ou abrir revisão controlada da estratégia por risco de qualidade.
-- [ ] O rastreamento da V2 registra a configuração escolhida, o racional e o que permaneceu fora de escopo para fases futuras.
+- [x] Existe uma decisão explícita sobre a configuração padrão de K e nprobe que seguirá para a V2.
+- [x] Existe uma decisão explícita sobre manter o caminho em int8 ou abrir revisão controlada da estratégia por risco de qualidade.
+- [x] O rastreamento da V2 registra a configuração escolhida, o racional e o que permaneceu fora de escopo para fases futuras.
 
 ## Bloqueada por
 
