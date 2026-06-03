@@ -67,8 +67,18 @@ Queries de fronteira têm vizinhos reais em clusters não visitados.
 
 ## V3: Celeritas — Remoção de overhead — rápido de implementar
 
-Todos os itens são independentes e podem ser feitos em qualquer ordem.
-Nenhum exige mudança no algoritmo de busca.
+> **Plano de execução detalhado em [`v3/01-celeritas.md`](v3/01-celeritas.md).**
+> Escopo final acordado: **pré-requisito (pin K=1024/nprobe=4) + V3-A + V3-B + V3-D**.
+> O **V3-C foi removido/adiado** e o **V3-D foi puxado do V4-D**.
+
+Nenhum item exige mudança no algoritmo de busca.
+
+### Pré-requisito: fixar o envelope K=1024 / nprobe=4
+
+O build default ainda está na config de experimentação (`Dockerfile`:
+`NUM_CLUSTERS=256`; `docker-compose.yml`: `NPROBE` default `8`). A V2 fechou em
+**K=1024, nprobe=4**. Antes de qualquer medição da V3, fixar `NUM_CLUSTERS=1024` e
+`NPROBE=4` — sem isso, "antes/depois" mediria a config errada (~257ms, não 36ms).
 
 ### V3-A: Page pre-warming
 
@@ -106,47 +116,70 @@ static {
 
 Zero serialização por request. Elimina alocação de String e GC pressure.
 
-### V3-C: nginx em modo stream + Unix domain sockets
+### V3-C: nginx stream + Unix domain sockets — ❌ REMOVIDO / ADIADO
 
-Trocar o bloco `http {}` por `stream {}`. nginx passa a encaminhar TCP puro
-sem parsear HTTP. Confirmado por papagaio (-0.01ms) e lucasmontano.
+São duas mudanças com custos opostos: o `http{}` → `stream{}` é barato mas de ganho
+~nulo (perde o keepalive/balanceamento HTTP que o `nginx.conf` atual já explora), e a
+parte valiosa — Jetty escutando em Unix domain socket — é cara e frágil (customizar
+`Server`/`ServerConnector` na mão). Decisivo: essa camada é exatamente o que o **V4-E
+(servidor NIO custom)** e o **V6 (fd-passing)** reescrevem do zero — investir agora
+vira lixo em duas versões. Adiado. Detalhes em [`v3/01-celeritas.md`](v3/01-celeritas.md).
 
-```nginx
-stream {
-    upstream api_backend {
-        server unix:/tmp/api1.sock;
-        server unix:/tmp/api2.sock;
-    }
-    server {
-        listen 9999 reuseport backlog=4096;
-        proxy_pass api_backend;
-    }
-}
-```
+### V3-D: Hot path de busca sem alocação (puxado do V4-D)
 
-Requer que Javalin (ou o servidor custom de V4-C) escute em Unix domain socket
-(`UnixDomainSocketAddress`, disponível desde Java 16).
-
-**Ressalva:** modo stream perde HTTP keepalive gerenciado pelo nginx. Medir
-ganho líquido — impacto depende do volume de conexões persistentes.
+`V2IndexSearcher.search` aloca um `SearchResult` + uma `String` por candidato varrido
+(~11.720 por request em K=1024/nprobe=4) — a maior fonte de garbage do hot path.
+Refatorar o **interior** do `search` (sem quebrar a interface `VectorSearcher`): trocar
+`PriorityQueue<SearchResult>` por insertion sort sobre arrays primitivos (`double[]`
+distância + `byte[]` label), materializando os 5 `SearchResult` só no final. Recall
+idêntico, garbage por candidato eliminado. É o V4-D antecipado para a V3 — ver detalhes
+e a nota sobre `nearestFraudCount` em [`v3/01-celeritas.md`](v3/01-celeritas.md).
 
 ---
 
-## V4: Veritas — Busca exata e hot path
+## V4: Veritas — Busca exata (correção de detecção)
 
-O conjunto de mudanças com maior impacto potencial de score.
+> **Reescopo pós-V3.** A V3 saturou o `score_p99` (configs em 13–24ms) e o
+> `final_score` passou a ser decidido pelo `score_det`, preso em ~1.335 pelo limite
+> estrutural do IVF aproximado. A única alavanca de score que sobra é **detecção**.
+> A V4 foca nisso: busca exata + aperto da cauda de p99. Itens de latência pura
+> (servidor NIO) saíram para perto da V6, onde latência volta a pagar.
 
-### V4-A: Bounding-box pruning por cluster ⭐ prioridade máxima
+Tema **Veritas** — a verdade da detecção. Sequência: diagnóstico → V4-A → (gate) → V4-C.
 
-Transforma o IVF aproximado em busca exata. Confirmado por AndDev741 como
-responsável pelos 0 FP e 0 FN que valem 4.057 de score com p99=87ms.
+### V4-0: Diagnóstico de percentis (abre a V4) — barato
 
-**Build time:** para cada cluster, calcular e persistir `int8[14] bboxMin` e
-`int8[14] bboxMax` (em int8 já que os vetores são int8). São `2 × 14 × 1024`
-bytes = 28KB adicionais no artefato `.v2`.
+Antes de otimizar, medir. Adicionar `p(50)` e `p(95)` ao K6 (uma linha em
+`test/test.js`) e rodar o envelope algumas vezes. Separa as duas causas do spread de
+cauda residual da V3:
 
-**Query time:** após ranquear centroides e selecionar os `nprobe` clusters para
-varredura completa, iterar sobre os clusters restantes:
+- **Só o p99 balança** (p50/p95 estáveis) → cauda de GC. Justifica o **V4-C**.
+- **p50/p95 balançam junto** → host sem CPU. É ruído de medição; V4-C não ajuda.
+
+Detalhes e as duas hipóteses em [`v3/05-diagnostico-percentis.md`](v3/05-diagnostico-percentis.md).
+Custo: uma linha mudada + uma rodada. **Decide se o V4-C entra.**
+
+### V4-A: Bounding-box pruning por cluster ⭐ o coração da V4
+
+Transforma o IVF aproximado em busca **provadamente exata**. Confirmado por AndDev741
+como responsável pelos 0 FP e 0 FN que valem 4.056 de score com p99=87ms.
+
+**Passo 1 — investigação de quantização (antes de codar o pruning):**
+O bbox pruning remove o erro de **aproximação** do IVF, mas não o erro de
+**quantização** int8. Nossos 207 erros (105 FP + 102 FN) misturam os dois. AndDev741
+chega a 0/0 com **int16** (×10.000) e relata que int8 perdeu qualidade. Antes de
+assumir, medir: comparar **int8-exato-BF vs float32-BF** para isolar quanto erro é
+quantização.
+
+- Poucos erros de quantização → fica **int8** (bbox de 28KB, artefato intacto).
+- Muitos → reabre a decisão **int8 → int16** (dobra os vetores ~28→56MB, aperta o
+  budget de ~195MB de page cache). Bifurcação real — só com prova na mão.
+
+**Build time:** para cada cluster, calcular e persistir `bboxMin[14]` e `bboxMax[14]`
+(int8 ou int16, conforme o passo 1). ~28KB (int8) adicionais no artefato `.v2`.
+
+**Query time:** após ranquear centroides e varrer os `nprobe` clusters, iterar sobre
+**TODOS** os clusters restantes e podar por lower-bound geométrico:
 
 ```java
 private int bboxLowerBound(byte[] query, byte[] bboxMin, byte[] bboxMax) {
@@ -162,36 +195,33 @@ private int bboxLowerBound(byte[] query, byte[] bboxMin, byte[] bboxMax) {
 ```
 
 Se `lb > currentWorst` (distância int do 5º vizinho atual) → skip o cluster.
-Prova matemática por triângulo: nenhum vetor dentro do cluster pode melhorar
-o top-5. Resultado: busca exata com ~95% dos clusters ignorados.
+Prova por triângulo: nenhum vetor dentro do cluster pode melhorar o top-5. Iterar
+**todos** os clusters (não só nprobe) é o que torna a busca exata — e é também o que
+torna o V4-B desnecessário (ver abaixo). Resultado: exatidão com ~95% dos clusters
+podados sem varredura.
 
-**Impacto estimado:** com 0 FP e 0 FN, `score_det` sobe de ~1.334 para ~2.000+.
-`final_score` estimado: 1.432 (p99) + 2.000 (det) = **3.400+**, bem acima do verde.
+**Impacto estimado:** com 0 FP e 0 FN, `score_det` sobe de ~1.335 para ~2.000+.
+`final_score` estimado: ~1.600 (p99 pós-V3) + ~2.000 (det) = **3.600+**, território
+top-10 Java.
 
 **Mudanças necessárias:**
 - `V2ArtifactBuilder`: calcular min/max por cluster durante build, persistir no diretório
-- `V2IndexSearcher`: ler bboxes do header, aplicar pruning no query time
-- `V2QualityGuardTest`: validar que busca exata tem 100% de acordo com float32 BF
+- `V2IndexSearcher`: ler bboxes, aplicar pruning iterando todos os clusters
+- `V2QualityGuardTest`: validar 100% de acordo com float32 BF (e medir o passo 1)
 
-### V4-B: IVF repair para queries ambíguas
+### V4-B: IVF repair para queries ambíguas — ❌ CORTADO (subsumido pelo V4-A)
 
-Técnica do lucasmontano: se após a busca o resultado for ambíguo
-(`fraud_count` ∈ {1,2,3,4} — próximo da fronteira de decisão a 0.6),
-escanear clusters adicionais até acumular mais candidatos.
+> O repair (lucasmontano) reescaneia clusters quando o IVF **aproximado** devolve
+> resultado ambíguo. Mas o V4-A, iterando todos os clusters com poda por bbox, já
+> entrega top-5 **exato** — não sobra ambiguidade para reparar. O V4-B resolve um
+> problema que o V4-A elimina. Cortado; mantido aqui só como registro da decisão.
 
-```java
-// Após busca inicial com nprobe clusters
-int fraudCount = countFraud(topK);
-if (fraudCount >= 1 && fraudCount <= 4) {
-    // Resultado incerto — expandir busca para clusters vizinhos
-    expandSearch(query, topK, additionalClusters);
-}
-```
+### V4-C: Custom JSON parser (zero-alocação) — condicionado ao V4-0
 
-Complementa V4-A: a bbox pruning garante exatidão para queries claras; o repair
-garante qualidade extra nas queries de fronteira que mais importam para o score.
-
-### V4-C: Custom JSON parser (zero-alocação)
+> **Entra só se o diagnóstico (V4-0) apontar cauda de GC.** Pós-V3, o Jackson no
+> parse de **entrada** é a última fonte de alocação por request — a suspeita nº 1 do
+> spread de p99. O impacto é **risco/cauda**, não mediana de score (o `score_p99` já
+> saturou). Bônus: remove uma fonte de reflection, simplificando o V5 (GraalVM).
 
 Jackson aloca por request. Para schema fixo e payload pequeno, cursor-based
 é 10–20× mais rápido e zero-alocação. Confirmado por todos os top performers.
@@ -204,45 +234,18 @@ Técnica chave: ISO-8601 → epoch seconds sem `Instant`/`ZonedDateTime`, usando
 algoritmo de Howard Hinnant (daysFromCivil). O caller passa `float[]` pré-alocado;
 o parser escreve in-place — zero `new` no hot path.
 
-### V4-D: Insertion sort para K=5
+### V4-D: Insertion sort para K=5 — ✅ JÁ ENTREGUE NA V3-D
 
-`PriorityQueue` tem overhead de boxing e reorganização de heap. Para K=5 fixo,
-insertion sort é O(5) com acesso linear, cache-friendly, zero alocação.
+> Antecipado para a V3 e entregue (commit do V3-D). Detalhes em
+> [`v3/03-busca-sem-alocacao.md`](v3/03-busca-sem-alocacao.md). Fora do escopo da V4.
 
-```java
-// Array de 5 slots, mantido ordenado por distância crescente
-// thread-local — reuso entre requests
-private final long[] topDists  = new long[5];  // distância
-private final byte[] topLabels = new byte[5];   // label int8
+### V4-E: Custom HTTP server NIO — ➡️ MOVIDO PARA PERTO DA V6
 
-void tryInsert(long dist, byte label) {
-    if (size < 5 || dist < topDists[size - 1]) {
-        int pos = size < 5 ? size++ : 4;
-        while (pos > 0 && topDists[pos - 1] > dist) {
-            topDists[pos]  = topDists[pos - 1];
-            topLabels[pos] = topLabels[pos - 1];
-            pos--;
-        }
-        topDists[pos]  = dist;
-        topLabels[pos] = label;
-    }
-}
-```
-
-### V4-E: Custom HTTP server single-threaded (NIO)
-
-Substituir Javalin por NIO reactor (~500 linhas). Modelo single-threaded elimina
-context switches com 0.45 vCPU. Confirmado por arthurd3 e AndDev741.
-
-Micro-otimizações do arthurd3 a incorporar:
-- `selectNow()` antes de `select()` — evita syscall quando dados já buffered
-- Inline response write — escreve resposta no path de leitura (elimina um epoll_wait)
-
-**Pré-requisito:** V4-C (custom JSON parser) — sem Jackson, o servidor pode ser
-completamente desacoplado do framework.
-
-**Integração com V3-C:** se nginx está em stream mode, o servidor precisa escutar
-em `UnixDomainSocketAddress`.
+> Reescrita de ~500 linhas cujo payoff é **latência** — que a V3 já saturou. O ganho
+> de latência que sobra está no V6 (fd-passing, -80% p99 no arthurd3) e no V5 (GraalVM,
+> zero JIT warmup). Além disso o servidor NIO é **pré-requisito do fd-passing** (precisa
+> de `injectChannel()` para receber fds via `SCM_RIGHTS`). Faz mais sentido junto da V6
+> do que solto na V4. A técnica está preservada na seção V6.
 
 ---
 
@@ -286,6 +289,22 @@ Substituir nginx/HAProxy por um LB minimal que passa client fds via SCM_RIGHTS.
 
 **arthurd3 Onda 30:** HAProxy → Rust LB fd-passing deu **-80% de p99**
 (2.65ms → 1.86ms). Maior ganho único de infra em toda a jornada dele.
+
+### Pré-requisito desta versão: servidor HTTP NIO custom (ex-V4-E)
+
+Recebido da V4 — só faz sentido aqui, porque é onde a latência volta a pagar e
+porque o fd-passing **depende** dele (precisa injetar fds recebidos num Selector
+próprio, coisa que o Javalin/Jetty não expõe). Substituir Javalin por NIO reactor
+(~500 linhas, single-threaded — elimina context switches com 0.45 vCPU). Confirmado
+por arthurd3 e AndDev741. Micro-otimizações do arthurd3 a incorporar:
+
+- `selectNow()` antes de `select()` — evita syscall quando dados já buffered
+- Inline response write — escreve a resposta no path de leitura (elimina um `epoll_wait`)
+- `injectChannel()` — registra no Selector os fds recebidos do LB via `recvmsg()`
+
+**Pré-requisito do servidor NIO:** o V4-C (parser JSON custom), para desacoplar
+completamente do framework. Se o V4-C não tiver entrado na V4, entra aqui antes do
+servidor.
 
 **Mecanismo:**
 1. LB aceita TCP connection na porta 9999
@@ -343,28 +362,32 @@ resultado da busca exata — sem busca exata como ground truth, o treinamento
 V2 finalizada (K=1024, nprobe=4)
     └── Issue 05: congelar envelope operacional
          │
-         ├── V3 Celeritas (velocidade)
-         │   ├── V3-A  page pre-warming        ← 1-2h, elimina variância de latência
-         │   ├── V3-B  respostas pré-serializadas ← 30min, elimina alocação no hot path
-         │   └── V3-C  nginx stream + Unix sockets
+         ├── V3 Celeritas (velocidade) — ✅ ENTREGUE
+         │   ├── V3-0  pin K=1024/nprobe=4      ← pré-requisito de medição
+         │   ├── V3-A  page pre-warming        ← elimina variância cold/hot
+         │   ├── V3-B  respostas pré-serializadas ← elimina alocação na resposta
+         │   ├── V3-D  insertion sort sem alocação ← do V4-D; mata garbage da busca
+         │   └── V3-C  nginx stream + Unix sockets  ← ❌ removido/adiado
+         │   (resultado: score_p99 saturou; detecção é a folga que sobra)
          │
-         └── V4 Veritas (verdade) — bounding-box pruning ⭐ ← PRIORIDADE MÁXIMA
-                   (busca exata → 0 FP/FN → score ~3.400+)
+         └── V4 Veritas (verdade) — busca exata ⭐ ← PRIORIDADE MÁXIMA
+                   (0 FP/FN → score_det ~2.000+ → final ~3.600+)
                     │
-                    ├── V4-A  bounding-box pruning
-                    ├── V4-B  IVF repair para fronteira
-                    ├── V4-C  custom JSON parser (zero-alocação)
-                    ├── V4-D  insertion sort K=5
-                    ├── V4-E  custom HTTP server NIO
+                    ├── V4-0  diagnóstico de percentis (p50/p95)  ← decide se C entra
+                    ├── V4-A  bounding-box pruning (+ invest. int8/int16) ⭐
+                    ├── V4-B  IVF repair          ← ❌ cortado (subsumido por A)
+                    ├── V4-C  custom JSON parser  ← condicionado ao V4-0
+                    ├── V4-D  insertion sort K=5  ← ✅ entregue na V3-D
+                    ├── V4-E  custom HTTP server NIO ← ➡️ movido para a V6
                     │
-                    ├── [medir score — se ≥ 4.000: V5/V6 são incrementais]
+                    ├── [GATE: medir score — replanejar V5/V6 com o número novo]
                     │
                     ├── V5 Opus (obra-prima)
                     │      GraalVM Native Image + PGO
-                    │      (simplificado após V4-C/E eliminarem Jackson+Javalin)
+                    │      (simplificado após V4-C eliminar Jackson)
                     │
                     ├── V6 Pontifex (pontes)
-                    │      fd-passing LB (C ou Rust) ← maior salto de infra
+                    │      servidor NIO custom (ex-V4-E) + fd-passing LB (C/Rust)
                     │      (-80% p99 confirmado por arthurd3)
                     │
                     └── V7 Sapientia (sabedoria)
@@ -372,6 +395,8 @@ V2 finalizada (K=1024, nprobe=4)
 ```
 
 **Gate de decisão principal — após V4-A:**
-Se bbox pruning levar `score_det` de ~1.334 para ~2.000+, o `final_score` cruza
-3.400 e entra em território de top-10 Java. A partir daí, V5 (GraalVM) e V6
-(fd-passing) são os alavancadores de latência para perseguir o top-5.
+Se bbox pruning levar `score_det` de ~1.335 para ~2.000+, o `final_score` cruza
+3.600 e entra em território de top-10 Java. Latência não é mais o gargalo (a V3
+saturou o `score_p99`), então a partir daí V5 (GraalVM, zero JIT warmup) e V6
+(servidor NIO + fd-passing, -80% p99) são os alavancadores para perseguir o top-5 —
+replanejados com o score pós-V4-A na mão.
