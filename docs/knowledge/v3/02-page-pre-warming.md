@@ -99,7 +99,7 @@ A sequência de inicialização do `JavalinBootstrap.create()` fica:
 ```
 1. V2IndexSearcher instanciado (mmap aberto, mas frio)
 2. searcher.prewarm()          ← page-warm: toca todas as páginas
-3. WarmupService.warmup()      ← JIT-warm: 50 buscas reais compilam o hot path
+3. WarmupService.warmup()      ← JIT-warm: aquece o hot path até o platô (ver 04-warmup-plato.md)
 4. Javalin.create().start()    ← servidor aceita conexões
 5. /ready responde 200         ← tráfego liberado
 ```

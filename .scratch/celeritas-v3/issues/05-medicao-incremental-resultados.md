@@ -1,6 +1,6 @@
 # Issue 05 — Medição incremental + registro de resultados
 
-Status: ready-for-human
+Status: done
 
 ## Issue pai
 
@@ -31,12 +31,12 @@ sem impacto em FP/FN.
 
 ## Critérios de aceite
 
-- [ ] Baseline K6 capturado com o envelope correto (K=1024/nprobe=4).
-- [ ] Medições incrementais capturadas após cada uma das fatias V3-A, V3-B e V3-D.
-- [ ] Zero erros HTTP sob a carga do K6 em todas as medições.
-- [ ] A seção "Resultados" de `docs/knowledge/v3/01-celeritas.md` é preenchida com os
+- [x] Baseline K6 capturado com o envelope correto (K=1024/nprobe=4).
+- [x] Medições incrementais capturadas após cada uma das fatias V3-A, V3-B e V3-D.
+- [x] Zero erros HTTP sob a carga do K6 em todas as medições.
+- [x] A seção "Resultados" de `docs/knowledge/v3/01-celeritas.md` é preenchida com os
       números medidos e a comparação com a linha de base da V2.
-- [ ] O documento explica o porquê dos ganhos observados (não só os números).
+- [x] O documento explica o porquê dos ganhos observados (não só os números).
 
 ## Bloqueada por
 
