@@ -18,33 +18,33 @@ import java.util.List;
  * Buscador IVF (Inverted File Index) sobre o artefato binário V2.
  *
  * Em tempo de consulta:
- * 1. Quantiza a query para int8.
- * 2. Calcula distância euclidiana ao quadrado entre a query e cada centróide.
+ * 1. Quantiza a query para int[] (i8 ou i16, conforme dtype do artefato).
+ * 2. Calcula distância euclidiana ao quadrado entre a query e cada centróide (int[][]).
  * 3. Seleciona os nprobe clusters mais próximos.
  * 4. Escaneia apenas os registros desses clusters com max-heap de tamanho k.
  *
  * O artefato pode ter qualquer número de clusters ≥ 1. Se nprobe ≥ numClusters,
  * o comportamento é equivalente ao brute force da Issue 01.
  *
- * Layout do arquivo:
- * [Header 24 bytes]
- * [Diretório: numClusters × 30 bytes] — centróide(14) + radius(4) + offset(8) +
- * count(4)
- * [Blocos de registros por cluster] — 16 bytes cada: label(1) + vetor(14) +
- * padding(1)
+ * Layout i8 (dtype=1):
+ *   [Header 24 bytes] [Diretório: K × 30 bytes] [Registros: 16 bytes cada]
+ *
+ * Layout i16 (dtype=2):
+ *   [Header 24 bytes] [Diretório: K × 44 bytes] [Registros: 30 bytes cada]
  */
 public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
     private static final int DIMS = V2ArtifactBuilder.DIMS;
-    private static final int SCALE = V2ArtifactBuilder.SCALE;
-    private static final int RECORD_SIZE = V2ArtifactBuilder.RECORD_SIZE;
 
     private static volatile long PREWARM_SINK = 0;
 
     private final int numClusters;
     private final int nprobe;
     private final long dataOffset;
-    private final byte[][] centroids; // int8, um por cluster
+    private final byte dtype;
+    private final int scale;
+    private final int recordSize;
+    private final int[][] centroids; // widened de byte (i8) ou short (i16) — unifica centroidDist
     private final int[] counts; // registros por cluster
     private final long[] offsets; // offsets relativos ao dataOffset
     private final Arena arena;
@@ -65,6 +65,9 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         Header header = readHeader(artifactPath);
         this.numClusters = header.numClusters;
         this.dataOffset = header.dataOffset;
+        this.dtype = header.dtype;
+        this.scale = (dtype == V2ArtifactBuilder.DTYPE_I16) ? V2ArtifactBuilder.SCALE_I16 : V2ArtifactBuilder.SCALE;
+        this.recordSize = (dtype == V2ArtifactBuilder.DTYPE_I16) ? V2ArtifactBuilder.RECORD_SIZE_I16 : V2ArtifactBuilder.RECORD_SIZE;
         this.centroids = header.centroids;
         this.counts = header.counts;
         this.offsets = header.offsets;
@@ -76,24 +79,39 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
     @Override
     public List<SearchResult> search(float[] queryVector, int k) {
-        byte[] q = quantizeQuery(queryVector);
+        int[] qi = quantizeQuery(queryVector);
 
         // Ordena clusters por distância crescente ao centróide
-        int[] ranked = rankClusters(q);
+        int[] ranked = rankClusters(qi);
 
         TopKSelector selector = new TopKSelector(k);
         int probes = Math.min(nprobe, numClusters);
 
-        for (int ci = 0; ci < probes; ci++) {
-            int cluster = ranked[ci];
-            long blockStart = dataOffset + offsets[cluster];
-            int blockCount = counts[cluster];
-
-            for (int i = 0; i < blockCount; i++) {
-                long recordBase = blockStart + (long) i * RECORD_SIZE;
-                double dist = calculator.calculateI8(q, file, recordBase + 1, DIMS);
-                byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
-                selector.tryInsert(dist, labelByte);
+        if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+            short[] q16 = toI16Query(qi);
+            for (int ci = 0; ci < probes; ci++) {
+                int cluster = ranked[ci];
+                long blockStart = dataOffset + offsets[cluster];
+                int blockCount = counts[cluster];
+                for (int i = 0; i < blockCount; i++) {
+                    long recordBase = blockStart + (long) i * recordSize;
+                    double dist = calculator.calculateI16(q16, file, recordBase + 1, DIMS);
+                    byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+                    selector.tryInsert(dist, labelByte);
+                }
+            }
+        } else {
+            byte[] q8 = toI8Query(qi);
+            for (int ci = 0; ci < probes; ci++) {
+                int cluster = ranked[ci];
+                long blockStart = dataOffset + offsets[cluster];
+                int blockCount = counts[cluster];
+                for (int i = 0; i < blockCount; i++) {
+                    long recordBase = blockStart + (long) i * recordSize;
+                    double dist = calculator.calculateI8(q8, file, recordBase + 1, DIMS);
+                    byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+                    selector.tryInsert(dist, labelByte);
+                }
             }
         }
 
@@ -141,13 +159,13 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
     /** Ordena os índices de cluster por distância euclidiana ao quadrado até q. */
-    private int[] rankClusters(byte[] q) {
+    private int[] rankClusters(int[] q) {
         long[] distAndIdx = new long[numClusters];
 
         for (int c = 0; c < numClusters; c++) {
-            long dist = centroidDist(q, centroids[c]);
+            int dist = centroidDist(q, centroids[c]);
             // Empacota: Distância nos 32 bits altos | Índice nos 32 bits baixos
-            distAndIdx[c] = (dist << 32) | c;
+            distAndIdx[c] = ((long) dist << 32) | c;
         }
 
         // Sort 100% primitivo. O Java ordena pelos 32 bits altos (a distância)
@@ -162,20 +180,39 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         return result;
     }
 
-    /** Distância euclidiana ao quadrado entre dois vetores int8. */
-    private static int centroidDist(byte[] q, byte[] c) {
-        int sum = 0;
+    /**
+     * Distância euclidiana ao quadrado entre dois vetores em espaço int.
+     * Retorna saturado em Integer.MAX_VALUE para i16 onde a soma pode exceder int.
+     */
+    private static int centroidDist(int[] q, int[] c) {
+        long sum = 0;
         for (int d = 0; d < DIMS; d++) {
             int diff = q[d] - c[d];
-            sum += diff * diff;
+            sum += (long) diff * diff;
         }
-        return sum;
+        return (int) Math.min(sum, Integer.MAX_VALUE);
+    }
+
+    private static byte[] toI8Query(int[] q) {
+        byte[] b = new byte[q.length];
+        for (int i = 0; i < q.length; i++) {
+            b[i] = (byte) q[i];
+        }
+        return b;
+    }
+
+    private static short[] toI16Query(int[] q) {
+        short[] s = new short[q.length];
+        for (int i = 0; i < q.length; i++) {
+            s[i] = (short) q[i];
+        }
+        return s;
     }
 
     // ── Leitura do cabeçalho e diretório ─────────────────────────────────────────
 
-    private record Header(int numClusters, long dataOffset,
-            byte[][] centroids, int[] counts, long[] offsets) {
+    private record Header(int numClusters, long dataOffset, byte dtype,
+            int[][] centroids, int[] counts, long[] offsets) {
     }
 
     private static Header readHeader(Path artifactPath) throws IOException {
@@ -189,46 +226,62 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
             }
             short dims = dis.readShort();
             byte dtype = dis.readByte();
-            if (dtype != V2ArtifactBuilder.DTYPE_I8) {
+            if (dtype != V2ArtifactBuilder.DTYPE_I8 && dtype != V2ArtifactBuilder.DTYPE_I16) {
                 throw new IllegalStateException(
-                        "Tipo I8 esperado (dtype=1), encontrado: " + dtype);
+                        "dtype desconhecido (esperado 1=i8 ou 2=i16), encontrado: " + dtype);
             }
             int numClusters = dis.readInt();
             dis.readLong(); // clusterDirOffset — imediatamente após header
             long dataOffset = dis.readLong();
 
-            byte[][] centroids = new byte[numClusters][dims];
+            int[][] centroids = new int[numClusters][dims];
             int[] counts = new int[numClusters];
             long[] offsets = new long[numClusters];
 
             for (int c = 0; c < numClusters; c++) {
-                dis.readFully(centroids[c]); // centróide int8 (dims bytes)
+                if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+                    // Centróide como shorts LE (28 bytes = 14 × 2)
+                    for (int d = 0; d < dims; d++) {
+                        int lo = dis.readByte() & 0xFF;
+                        int hi = dis.readByte() & 0xFF;
+                        centroids[c][d] = (short) (lo | (hi << 8)); // widen para int
+                    }
+                } else {
+                    // Centróide como bytes signed (14 bytes)
+                    for (int d = 0; d < dims; d++) {
+                        centroids[c][d] = dis.readByte(); // widen signed byte → int
+                    }
+                }
                 dis.readFloat(); // radius — ignorado no IVF por distância
                 offsets[c] = dis.readLong();
                 counts[c] = dis.readInt();
             }
 
-            return new Header(numClusters, dataOffset, centroids, counts, offsets);
+            return new Header(numClusters, dataOffset, dtype, centroids, counts, offsets);
         }
     }
 
     /**
-     * Quantiza o vetor de query com a mesma regra do V2ArtifactBuilder:
-     * −1.0f → −128 (sentinela), demais → round(v × 127), clamp [−127, 127].
+     * Quantiza o vetor de query para int[] com a mesma regra do V2ArtifactBuilder.
+     * Para i8:  −1.0f → Byte.MIN_VALUE,  demais → round(v × 127),  clamp [−127, 127].
+     * Para i16: −1.0f → Short.MIN_VALUE, demais → round(v × 10000), clamp [−32767, 32767].
      */
-    private static byte[] quantizeQuery(float[] v) {
-        byte[] q = new byte[DIMS];
+    private int[] quantizeQuery(float[] v) {
+        int[] q = new int[DIMS];
         for (int d = 0; d < DIMS; d++) {
             float val = v[d];
             if (val == -1.0f) {
-                q[d] = Byte.MIN_VALUE;
+                q[d] = (dtype == V2ArtifactBuilder.DTYPE_I16) ? Short.MIN_VALUE : Byte.MIN_VALUE;
             } else {
-                int r = Math.round(val * SCALE);
-                if (r < -127)
-                    r = -127;
-                if (r > 127)
-                    r = 127;
-                q[d] = (byte) r;
+                int r = Math.round(val * scale);
+                if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+                    if (r < -32767) r = -32767;
+                    if (r >  32767) r =  32767;
+                } else {
+                    if (r < -127) r = -127;
+                    if (r >  127) r =  127;
+                }
+                q[d] = r;
             }
         }
         return q;

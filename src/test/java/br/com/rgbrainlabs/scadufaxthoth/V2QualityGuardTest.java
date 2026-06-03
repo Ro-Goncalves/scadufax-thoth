@@ -4,8 +4,9 @@ import br.com.rgbrainlabs.scadufaxthoth.domain.SearchResult;
 import br.com.rgbrainlabs.scadufaxthoth.prep.V2ArtifactBuilder;
 import br.com.rgbrainlabs.scadufaxthoth.search.EuclideanDistanceCalculator;
 import br.com.rgbrainlabs.scadufaxthoth.search.V2IndexSearcher;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -14,6 +15,7 @@ import java.util.*;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
 
 /**
  * Guarda de qualidade da V2: compara IVF contra referência exata e falha
@@ -45,13 +47,14 @@ class V2QualityGuardTest {
     /** Acordo de decisão mínimo entre IVF (nprobe=TEST_NPROBE) e float32 BF. */
     private static final double MIN_AGREEMENT_IVF          = 0.80;
 
-    @Test
-    void guardaQualidade_preservaDecisoesDeFragude(@TempDir Path tmpDir) throws Exception {
+    @ParameterizedTest
+    @EnumSource(V2ArtifactBuilder.Dtype.class)
+    void guardaQualidade_preservaDecisoesDeFragude(V2ArtifactBuilder.Dtype dtype, @TempDir Path tmpDir) throws Exception {
         List<FixtureRecord> records = buildFixtureRecords();
         Path gz       = tmpDir.resolve("fixture.json.gz");
         Path artifact = tmpDir.resolve("index.v2");
         writeGz(gz, toJson(records));
-        V2ArtifactBuilder.build(gz, artifact, NUM_CLUSTERS, 10, 0L);
+        V2ArtifactBuilder.build(gz, artifact, NUM_CLUSTERS, 10, 0L, dtype);
 
         List<float[]> queries = buildQueries();
         int n = queries.size();
