@@ -4,9 +4,11 @@ import br.com.rgbrainlabs.scadufaxthoth.prep.V2ArtifactBuilder;
 import br.com.rgbrainlabs.scadufaxthoth.search.EuclideanDistanceCalculator;
 import br.com.rgbrainlabs.scadufaxthoth.search.TransactionVectorizer;
 import br.com.rgbrainlabs.scadufaxthoth.search.V2IndexSearcher;
+import br.com.rgbrainlabs.scadufaxthoth.web.PreSerializedResponseTable;
 import br.com.rgbrainlabs.scadufaxthoth.web.ReadyHandler;
 import br.com.rgbrainlabs.scadufaxthoth.web.SearchHandler;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import io.javalin.Javalin;
@@ -73,7 +75,13 @@ class V2EndToEndTest {
         V2IndexSearcher searcher = new V2IndexSearcher(artifact, new EuclideanDistanceCalculator());
         TransactionVectorizer vectorizer = new TransactionVectorizer(normMap(), Map.of());
 
-        SearchHandler searchHandler = new SearchHandler(searcher, vectorizer, 5, 0.6);
+        ObjectMapper testMapper = new ObjectMapper();
+        testMapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+        testMapper.findAndRegisterModules();
+        testMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        testMapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+        PreSerializedResponseTable responseTable = new PreSerializedResponseTable(5, 0.6, testMapper);
+        SearchHandler searchHandler = new SearchHandler(searcher, vectorizer, responseTable);
         ReadyHandler  readyHandler  = new ReadyHandler();
 
         Javalin app = Javalin.create(cfg -> {

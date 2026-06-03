@@ -4,10 +4,12 @@ import br.com.rgbrainlabs.scadufaxthoth.config.AppConfig;
 import br.com.rgbrainlabs.scadufaxthoth.search.EuclideanDistanceCalculator;
 import br.com.rgbrainlabs.scadufaxthoth.search.TransactionVectorizer;
 import br.com.rgbrainlabs.scadufaxthoth.search.V2IndexSearcher;
+import br.com.rgbrainlabs.scadufaxthoth.web.PreSerializedResponseTable;
 import br.com.rgbrainlabs.scadufaxthoth.web.ReadyHandler;
 import br.com.rgbrainlabs.scadufaxthoth.web.SearchHandler;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import io.javalin.Javalin;
@@ -40,8 +42,16 @@ public final class JavalinBootstrap {
         searcher.prewarm();
         WarmupService.warmup(searcher, vectorizer);
 
-        SearchHandler searchHandler = new SearchHandler(
-                searcher, vectorizer, config.kNeighbors(), config.fraudThreshold());
+        ObjectMapper sharedMapper = new ObjectMapper();
+        sharedMapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+        sharedMapper.findAndRegisterModules();
+        sharedMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        sharedMapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+
+        PreSerializedResponseTable responseTable = new PreSerializedResponseTable(
+                config.kNeighbors(), config.fraudThreshold(), sharedMapper);
+
+        SearchHandler searchHandler = new SearchHandler(searcher, vectorizer, responseTable);
         ReadyHandler readyHandler = new ReadyHandler();
 
         return Javalin.create(javalinConfig -> {
