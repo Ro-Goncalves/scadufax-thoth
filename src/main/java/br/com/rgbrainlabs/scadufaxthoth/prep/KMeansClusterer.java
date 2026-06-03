@@ -2,6 +2,7 @@ package br.com.rgbrainlabs.scadufaxthoth.prep;
 
 import java.util.Arrays;
 import java.util.Random;
+import java.util.stream.IntStream;
 
 /**
  * Lloyd's K-means sobre vetores int8.
@@ -46,9 +47,17 @@ public final class KMeansClusterer {
         Arrays.fill(assignments, 0);
 
         for (int iter = 0; iter < maxIterations; iter++) {
-            boolean changed = assignStep(vectors, centroids, assignments);
-            if (!changed) break;
+            long it0 = System.currentTimeMillis();
+            int changed = assignStep(vectors, centroids, assignments);
+            if (changed == 0) {
+                System.out.printf("[kmeans] iter %d/%d: convergiu (0 reatribuicoes)%n",
+                        iter + 1, maxIterations);
+                break;
+            }
             updateStep(vectors, assignments, centroids, actualK);
+            System.out.printf("[kmeans] iter %d/%d: %d reatribuicoes (%.1fs)%n",
+                    iter + 1, maxIterations, changed,
+                    (System.currentTimeMillis() - it0) / 1000.0);
         }
 
         return new ClusterResult(centroids, assignments);
@@ -79,19 +88,25 @@ public final class KMeansClusterer {
     /**
      * Passo de atribuição: cada vetor vai para o centróide mais próximo.
      *
-     * @return true se pelo menos uma atribuição mudou
+     * É O(n·k·DIMS) e domina o custo do K-means — para k grande (ex.: 2048) e
+     * n na casa dos milhões, roda em paralelo sobre os cores disponíveis. Cada
+     * vetor é atribuído de forma independente (escritas em índices distintos de
+     * {@code assignments}), então o resultado é idêntico ao serial e continua
+     * determinístico para uma dada seed.
+     *
+     * @return número de vetores que mudaram de cluster (0 = convergiu)
      */
-    private static boolean assignStep(byte[][] vectors, byte[][] centroids, int[] assignments) {
-        boolean changed = false;
+    private static int assignStep(byte[][] vectors, byte[][] centroids, int[] assignments) {
         int k = centroids.length;
 
-        for (int i = 0; i < vectors.length; i++) {
-            int best     = assignments[i];
-            int bestDist = dist(vectors[i], centroids[best]);
+        return IntStream.range(0, vectors.length).parallel().map(i -> {
+            byte[] v        = vectors[i];
+            int    best     = assignments[i];
+            int    bestDist = dist(v, centroids[best]);
 
             for (int c = 0; c < k; c++) {
                 if (c == best) continue;
-                int d = dist(vectors[i], centroids[c]);
+                int d = dist(v, centroids[c]);
                 if (d < bestDist) {
                     bestDist = d;
                     best     = c;
@@ -100,10 +115,10 @@ public final class KMeansClusterer {
 
             if (best != assignments[i]) {
                 assignments[i] = best;
-                changed = true;
+                return 1;
             }
-        }
-        return changed;
+            return 0;
+        }).sum();
     }
 
     /**
