@@ -37,6 +37,7 @@ public final class JavalinBootstrap {
         TransactionVectorizer vectorizer = new TransactionVectorizer(
                 config.normalizationMap(), config.mccRiskMap());
 
+        searcher.prewarm();
         WarmupService.warmup(searcher, vectorizer);
 
         SearchHandler searchHandler = new SearchHandler(

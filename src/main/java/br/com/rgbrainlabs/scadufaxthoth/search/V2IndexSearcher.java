@@ -41,6 +41,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     private static final int SCALE = V2ArtifactBuilder.SCALE;
     private static final int RECORD_SIZE = V2ArtifactBuilder.RECORD_SIZE;
 
+    private static volatile long PREWARM_SINK = 0;
+
     private final int numClusters;
     private final int nprobe;
     private final long dataOffset;
@@ -115,6 +117,39 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     @Override
     public void close() {
         arena.close();
+    }
+
+    /**
+     * Toca um byte a cada 4KB do MemorySegment mapeado, faltando todas as páginas
+     * na tabela de páginas do processo antes do /ready abrir.
+     *
+     * Por que tocar o próprio MemorySegment (não um FileChannel à parte)?
+     * Um FileChannel separado aquece apenas o page cache do SO. O mmap ainda
+     * sofreria um soft fault na tabela de páginas do processo na primeira busca.
+     * Tocar o mesmo segmento que o hot path usa elimina os dois overheads.
+     *
+     * Por que PREWARM_SINK volatile? O JIT detectaria que os bytes lidos não
+     * produzem efeito observável e eliminaria o laço (dead-code elimination).
+     * O volatile força a JVM a de fato ler e gravar, impedindo essa otimização.
+     *
+     * @return número de acessos realizados — útil para testes de cobertura
+     */
+    public long prewarm() {
+        long t0 = System.currentTimeMillis();
+        long size = file.byteSize();
+        long sink = 0;
+        long accesses = 0;
+        for (long off = 0; off < size; off += 4096) {
+            sink += file.get(ValueLayout.JAVA_BYTE, off);
+            accesses++;
+        }
+        if (size > 0 && (size % 4096) != 0) {
+            sink += file.get(ValueLayout.JAVA_BYTE, size - 1);
+        }
+        PREWARM_SINK = sink;
+        System.out.printf("[prewarm] %d páginas tocadas em %d ms%n",
+                accesses, System.currentTimeMillis() - t0);
+        return accesses;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
