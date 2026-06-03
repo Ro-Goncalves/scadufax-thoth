@@ -11,10 +11,8 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.PriorityQueue;
 
 /**
  * Buscador IVF (Inverted File Index) sobre o artefato binário V2.
@@ -83,7 +81,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         // Ordena clusters por distância crescente ao centróide
         int[] ranked = rankClusters(q);
 
-        PriorityQueue<SearchResult> pq = new PriorityQueue<>(k);
+        TopKSelector selector = new TopKSelector(k);
         int probes = Math.min(nprobe, numClusters);
 
         for (int ci = 0; ci < probes; ci++) {
@@ -93,25 +91,13 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
             for (int i = 0; i < blockCount; i++) {
                 long recordBase = blockStart + (long) i * RECORD_SIZE;
-               
                 double dist = calculator.calculateI8(q, file, recordBase + 1, DIMS);
-               
-                if (pq.size() < k) {
-                    byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
-                    String label = labelByte == 1 ? "fraud" : "legitimate";
-                    pq.offer(new SearchResult(label, dist));
-                } else if (dist < pq.peek().distance()) {
-                    byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
-                    String label = labelByte == 1 ? "fraud" : "legitimate";
-                    pq.poll();
-                    pq.offer(new SearchResult(label, dist));
-                }
+                byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+                selector.tryInsert(dist, labelByte);
             }
         }
 
-        List<SearchResult> results = new ArrayList<>(pq);
-        results.sort((a, b) -> Double.compare(a.distance(), b.distance()));
-        return results;
+        return selector.materialize();
     }
 
     @Override
