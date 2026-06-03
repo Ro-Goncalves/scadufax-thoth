@@ -15,8 +15,8 @@
 set -euo pipefail
 
 # ── Matriz de experimentos ────────────────────────────────────────────────────
-K_VALUES=(${K_VALUES:-2048 4096})
-NPROBE_VALUES=(${NPROBE_VALUES:-2 4})
+K_VALUES=(${K_VALUES:-1024 2048 4096})
+NPROBE_VALUES=(${NPROBE_VALUES:-2 4 6})
 
 RESULTS_DIR="${RESULTS_DIR:-benchmark-results}"
 READY_URL="http://localhost:9999/ready"
