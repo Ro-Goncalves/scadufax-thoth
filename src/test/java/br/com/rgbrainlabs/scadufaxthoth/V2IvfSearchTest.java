@@ -57,8 +57,8 @@ class V2IvfSearchTest {
         V2ArtifactBuilder.build(gz, artifact, 3, 10, 0L);
 
         assertTrue(Files.exists(artifact), "Artefato deve existir");
-        // header(24) + 3 cluster entries(90) + 30 registros×16(480) = 594 bytes
-        assertEquals(24 + 3 * 30 + 30 * 16L, Files.size(artifact),
+        // header(24) + 3 cluster entries×58 + 30 registros×16 (i8, pós-V4-A com bboxes)
+        assertEquals(24 + 3 * V2ArtifactBuilder.CLUSTER_ENTRY_SIZE + 30 * 16L, Files.size(artifact),
                 "Tamanho do artefato multi-cluster deve ser exato");
     }
 

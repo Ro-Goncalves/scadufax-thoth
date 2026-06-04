@@ -66,9 +66,9 @@ class V2EndToEndTest {
         V2ArtifactBuilder.build(gz, artifact);
 
         assertTrue(Files.exists(artifact), "Artefato V2 deve existir após o build");
-        // header(24) + 6 clusters×30(180) + 6 registros×16(96) = 300 bytes
+        // header(24) + 6 clusters×58 + 6 registros×16 (i8, pós-V4-A com bboxes)
         // (K-means cap: actualK = min(256, 6) = 6)
-        assertEquals(24 + 6 * 30 + 6 * 16L, Files.size(artifact),
+        assertEquals(24 + 6 * V2ArtifactBuilder.CLUSTER_ENTRY_SIZE + 6 * 16L, Files.size(artifact),
                 "Tamanho do artefato deve ser exato: header + clusters + registros");
 
         // ── 2. Bootstrap: cria o searcher e sobe o Javalin ──────────────────────
