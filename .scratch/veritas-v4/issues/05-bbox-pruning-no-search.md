@@ -1,6 +1,6 @@
 # Issue 05 — V4-A Passo 3: Bounding-box pruning no search
 
-Status: open
+Status: done
 
 ## Issue pai
 
@@ -41,19 +41,66 @@ bbox → contribuição 0; se está fora → `(diff ao lado mais próximo)²`.
 
 ## Critérios de aceite
 
-- [ ] **Guarda de qualidade com 0 divergências:** `V2QualityGuardTest` extendido para
+- [x] **Guarda de qualidade com 0 divergências:** `V2QualityGuardTest` extendido para
       exigir acordo de 100% com float32 brute-force (não apenas o threshold mínimo da
       V2). Toda query deve retornar os mesmos vizinhos da busca exata.
-- [ ] `TopKSelector.worstDist()` adicionado e coberto por teste: após inserções
+- [x] `TopKSelector.worstDist()` adicionado e coberto por teste: após inserções
       variadas, retorna `topDist[k-1]` e evolui corretamente conforme candidatos
       melhores entram.
-- [ ] A interface `VectorSearcher` permanece inalterada; testes existentes não mudam
+- [x] A interface `VectorSearcher` permanece inalterada; testes existentes não mudam
       de assinatura.
-- [ ] Zero alocação por candidato varrido no novo loop (confirmado por inspeção; não
+- [x] Zero alocação por candidato varrido no novo loop (confirmado por inspeção; não
       regride o trabalho do V3-D).
-- [ ] `V2QualityGuardTest` e `V2IvfSearchTest` existentes permanecem verdes.
+- [x] `V2QualityGuardTest` e `V2IvfSearchTest` existentes permanecem verdes.
 
 ## Bloqueada por
 
 Issue 04 (bboxes no build) — o searcher precisa dos bboxes carregados no header para
 executar o pruning.
+
+## Comments
+
+### Entrega (2026-06-04)
+
+Implementado e fechado. Mudanças:
+
+- `search/TopKSelector.java` — `worstDist()` devolve `topDist[k-1]` (e `Double.MAX_VALUE`
+  enquanto o top-k não enche, garantindo que nada seja podado prematuramente).
+- `search/V2IndexSearcher.java` — `search()` ganha o segundo laço de poda após os
+  `nprobe` iniciais; corpo de varredura extraído em `scanClusterI8`/`scanClusterI16`
+  (reuso pelos dois laços, sem alocação por candidato); `bboxLowerBound(...)` novo.
+- `search/TopKSelectorTest.java`, `V2QualityGuardTest.java` — testes (abaixo).
+- `docs/knowledge/v4/03-bounding-boxes.md` — nova seção 7 (algoritmo de busca com poda)
+  e correção do lower bound para `long`.
+
+**Desvio técnico do protótipo (intencional):** o `bboxLowerBound` acumula em `long`, não
+`int`. Em i16 a soma de quadrados ultrapassa `Integer.MAX_VALUE` (igual ao
+`calculateI16`); truncar para `int` daria um lower bound menor que a distância real e
+quebraria a exatidão da poda. A comparação `lb > worstDist()` é exata (inteiros < 2⁵³).
+
+### Análise dos critérios de aceite
+
+1. **Guarda de qualidade com 0 divergências** ✅ — `V2QualityGuardTest` agora compara,
+   por query, a lista de vizinhos do IVF podado (`nprobe=2`) com a do full-scan
+   (`nprobe=K`, oráculo que nunca poda) e exige igualdade (distância + label, em ordem);
+   além de `assertEquals(0, divPartitioning)` e `assertEquals(0, divQuantization)`.
+   Saída medida (i8 **e** i16): acordo quantização 100%, acordo IVF 100%, divergências
+   `quantização=0 particionamento=0`.
+2. **`TopKSelector.worstDist()` testado** ✅ — novo teste
+   `worstDist_retornaTopDistKMenos1EEvoluiComCandidatosMelhores`: `Double.MAX_VALUE`
+   antes de k inserções, `topDist[k-1]` ao encher, decréscimo monotônico quando entra
+   candidato melhor, e estabilidade quando entra candidato pior.
+3. **`VectorSearcher` inalterada** ✅ — assinatura intacta; tudo novo é privado
+   (`scanClusterI8/I16`, `bboxLowerBound`) ou método de instância no `TopKSelector`.
+   Nenhum teste mudou de assinatura.
+4. **Zero alocação por candidato** ✅ — o laço de poda faz uma chamada por cluster
+   sobrevivente; `scanClusterI8/I16` reusam o corpo do V3-D (inserção direta nos arrays
+   primitivos do `TopKSelector`, sem `new`); `bboxLowerBound` é estático sobre `int[]`
+   já existentes. Sem nova alocação por vetor varrido.
+5. **`V2QualityGuardTest` e `V2IvfSearchTest` verdes** ✅ — ambos passam; suíte completa
+   `mvn test` → **53 testes, 0 falhas**.
+
+### Fora do escopo (follow-up)
+
+Gate pós-V4-A (5 boots frios medindo `score_det`/`final_score` antes/depois) — PRD
+stories 24-25. Não é critério de aceite desta issue.
