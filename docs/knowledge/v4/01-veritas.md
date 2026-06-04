@@ -27,9 +27,9 @@ lento que nós, mas 1,5× melhor em score.
 |---|---|---|
 | **V4-0** | Diagnóstico de percentis (p50/p95 no K6) | Entra |
 | **V4-A** | Bounding-box pruning (busca exata) ⭐ | Entra |
-| ↳ Passo 0-A | Parametrização i8/i16 (`ARG DTYPE` no build) | Entra — pré-condição do Passo 1 |
-| ↳ Passo 1 | Investigação de quantização: int8-BF vs float32-BF | Entra — decide a escala usada |
-| ↳ Passo 2 | Build time: persistir `bboxMin`/`bboxMax` por cluster | Entra |
+| ↳ Passo 0-A | Parametrização i8/i16 (`ARG DTYPE` no build) | ✅ Entregue — benchmark i8 vs i16 executado |
+| ↳ Passo 1 | Investigação de quantização: int8 vs int16 | ✅ Decidido — **migra para i16** (veja resultados) |
+| ↳ Passo 2 | Build time: persistir `bboxMin`/`bboxMax` por cluster | ✅ Entregue (Issue 04) |
 | ↳ Passo 3 | Query time: pruning iterando todos os clusters | Entra |
 | **V4-B** | IVF repair | ❌ Cortado — subsumido pelo V4-A |
 | **V4-C** | Parser JSON custom (zero-alocação) | Condicionado ao V4-0 |
@@ -352,26 +352,26 @@ Image).
 ## Sequência de implementação
 
 ```
-1. V4-0     — adicionar p50/p95 ao K6 → rodar benchmark → registrar Hipótese A ou B
+✅ 1. V4-0     — adicionar p50/p95 ao K6 → Hipótese A confirmada (cauda de GC)
               ↓
-2. Passo 0-A — parametrizar dtype no V2ArtifactBuilder e no V2IndexSearcher
-               (ARG DTYPE=i8 no Dockerfile)
+✅ 2. Passo 0-A — parametrizar dtype no V2ArtifactBuilder e no V2IndexSearcher
+               (ARG DTYPE=i8|i16 no Dockerfile)
               ↓
-3. Passo 1  — investigação de quantização (int8-BF vs float32-BF no dataset real)
-               → decidir dtype → não avançar sem este número
+✅ 3. Passo 1  — benchmark i8 vs i16 (K=1024/nprobe=4, 5 boots frios)
+               → decisão: i16 (91% dos erros eram de quantização)
               ↓
-4. Passo 2  — bboxes no build (calcular min/max por cluster e persistir no diretório)
+✅ 4. Passo 2  — bboxes no build (calcular min/max por cluster e persistir no diretório)
               ↓
-5. Passo 3  — pruning no search (ler bboxes, iterar todos os clusters com poda)
+   5. Passo 3  — pruning no search (ler bboxes, iterar todos os clusters com poda)
               TopKSelector.worstDist()
               ↓
-6.          — validar V2QualityGuardTest com asserção 0 divergências
+   6.          — validar V2QualityGuardTest com asserção 0 divergências
               ↓
-7.          — benchmark 5 boots frios → registrar score_det e final_score
+   7.          — benchmark 5 boots frios → registrar score_det e final_score
 
 [GATE] — medir score; replanejar V5/V6 com o número novo
 
-8. V4-C     — (somente se V4-0 confirmou GC) parser JSON custom
+   8. V4-C     — parser JSON custom (V4-0 confirmou GC → entra no escopo)
 ```
 
 ---
@@ -385,7 +385,70 @@ Hipótese A confirmada (cauda de GC). Detalhes e tabela de runs na seção V4-0 
 
 ### V4-A — Bounding-box pruning
 
-> A medir após implementação (Issues 04 e 05).
+#### Passo 0-A + Passo 1: comparação i8 vs i16 ✅ (2026-06-03)
+
+5 boots frios completos com K=1024 / nprobe=4 para cada dtype:
+
+**i8 (SCALE=127):**
+
+| Run | p50 | p95 | p99 | FP | FN | score_det | final_score |
+|---|---|---|---|---|---|---|---|
+| 1 | 0.79ms | 32.65ms | 78.21ms | 106 | 102 | 1333.12 | 2439.88 |
+| 2 | 0.68ms | 2.66ms | 36.38ms | 106 | 102 | 1333.19 | 2772.35 |
+| 3 | 0.67ms | 2.36ms | 17.94ms | 106 | 102 | 1333.19 | 3079.44 |
+| 4 | 0.67ms | 2.51ms | 31.24ms | 106 | 102 | 1333.19 | 2838.48 |
+| 5 | 0.67ms | 2.25ms | 11.96ms | 106 | 102 | 1333.19 | 3255.63 |
+| **mediana** | **0.67ms** | **2.51ms** | **31.24ms** | — | — | **1333.19** | **2838.48** |
+
+**i16 (SCALE=10.000):**
+
+| Run | p50 | p95 | p99 | FP | FN | score_det | final_score |
+|---|---|---|---|---|---|---|---|
+| 1 | 0.71ms | 2.48ms | 17.95ms | 6 | 13 | 2501.17 | 4247.19 |
+| 2 | 0.70ms | 2.35ms | 18.35ms | 6 | 13 | 2501.17 | 4237.47 |
+| 3 | 0.71ms | 2.78ms | 35.94ms | 6 | 13 | 2501.17 | 3945.57 |
+| 4 | 0.73ms | 2.68ms | 34.25ms | 6 | 13 | 2501.17 | 3966.51 |
+| 5 | 0.72ms | 3.04ms | 48.54ms | 6 | 13 | 2501.17 | 3815.03 |
+| **mediana** | **0.71ms** | **2.68ms** | **34.25ms** | — | — | **2501.17** | **3966.51** |
+
+**Leitura:**
+
+- **A quantização era o gargalo de detecção, não o particionamento.** Os 208 erros do i8
+  (106 FP + 102 FN) caíram para 19 (6 FP + 13 FN) com i16 — redução de **91%** sem
+  alterar K, nprobe ou algoritmo. SCALE=127 era grosseiro demais para vetores de 14
+  dimensões: com valores de entrada na casa dos milhares, o int8 quantizado perdia
+  distinções métricas críticas.
+- **score_det saltou de 1333 para 2501 (+87,6%).** O teto teórico da V4 (~2.000+)
+  estimado no plano original foi superado — chegamos a 2501 só com a troca de dtype.
+- **final_score mediana: 2838 → 3967 (+39,7%).** O AndDev741 (4.056) não está mais tão
+  distante — e ainda há 19 erros residuais que o bounding-box pruning (Passo 2+3) pode
+  zerar.
+- **Custo de latência negligível.** p50: +0.04ms; p95: +0.17ms; p99: +3ms na mediana.
+  O artefato i16 é 2× maior em bytes, mas cabe confortavelmente no page cache.
+- **Os 19 erros restantes (6 FP + 13 FN) são de particionamento**, não de quantização —
+  o IVF com nprobe=4 não visita o cluster correto para essas queries de fronteira. São
+  o alvo exato do V4-A (bounding-box pruning).
+
+**Decisão:** migrar definitivamente para **i16**. O Passo 1 formal (full-scan nprobe=K)
+foi implicitamente respondido: se o i16 com nprobe=4 já reduz 91% dos erros, a
+quantização era a causa dominante. Avançar direto para Passo 2 (bboxes no build).
+
+> Benchmark completo em [`benchmark-veritas.md`](benchmark-veritas.md).
+
+#### Passo 2: bboxes no build ✅ (Issue 04)
+
+`bboxMin`/`bboxMax` por cluster são calculados na fase de distribuição do builder (mesma
+passagem que agrupa os registros, sem iteração extra) e persistidos no diretório. O
+`CLUSTER_ENTRY_SIZE` cresce para **58** (i8) / **100** (i16); o `V2IndexSearcher` lê e
+carrega as caixas na inicialização. A busca **ainda não muda** — o pruning que usa as
+caixas é o Passo 3 (Issue 05). A parametrização i8/i16 foi preservada.
+
+Validação: `V2BboxBuildTest` (parametrizado i8+i16) reparseia o artefato e garante que
+nenhum vetor fica fora da caixa do seu cluster, e que o searcher carrega as mesmas caixas;
+`V2QualityGuardTest` e os 52 testes da suíte seguem verdes.
+
+> Estudo didático (o que são bboxes, a matemática do lower bound, layout e reprodução) em
+> [`03-bounding-boxes.md`](03-bounding-boxes.md).
 
 ### V4-C — Parser JSON custom
 
