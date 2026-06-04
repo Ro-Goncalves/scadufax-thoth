@@ -1,6 +1,6 @@
 # Issue 03 — V4-A Passo 1: Investigação de quantização
 
-Status: open
+Status: done
 
 ## Issue pai
 
@@ -38,12 +38,12 @@ Comparar três buscas no dataset real (`references.json.gz`), contando divergên
 
 ## Critérios de aceite
 
-- [ ] O experimento foi rodado com o dataset real e produziu três contagens de
+- [x] O experimento foi rodado com o dataset real e produziu três contagens de
       divergência (float32-BF como ground truth, int8-full-scan, int16-full-scan).
-- [ ] Os números estão registrados em `docs/knowledge/v4/01-veritas.md`.
-- [ ] A decisão de dtype (**int8** ou **int16**) está registrada com justificativa
+- [X] Os números estão registrados em `docs/knowledge/v4/01-veritas.md`.
+- [X] A decisão de dtype (**int8** ou **int16**) está registrada com justificativa
       baseada nos números medidos.
-- [ ] As Issues 04 e 05 não começam antes deste resultado estar registrado.
+- [X] As Issues 04 e 05 não começam antes deste resultado estar registrado.
 
 ## Bloqueada por
 
