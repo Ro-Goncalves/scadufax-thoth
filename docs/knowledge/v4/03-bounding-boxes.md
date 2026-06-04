@@ -1,8 +1,9 @@
 # Bounding boxes: o que são, como funcionam e por que importam
 
-> Documento de estudo da V4-A (Veritas), Passo 2 — Issue 04.
+> Documento de estudo da V4-A (Veritas), Passos 2 e 3 — Issues 04 e 05.
 > Objetivo: que qualquer pessoa, inclusive quem está chegando agora no projeto,
-> entenda o conceito de *bounding box* e consiga reproduzir o que foi feito.
+> entenda o conceito de *bounding box*, como ele transforma a busca aproximada em
+> busca **exata**, e consiga reproduzir o que foi feito.
 
 ---
 
@@ -81,18 +82,28 @@ Somando as 14 dimensões, temos a distância (ao quadrado) de `q` até a caixa. 
 `bboxLowerBound`:
 
 ```java
-private int bboxLowerBound(int[] query, int[] bboxMin, int[] bboxMax) {
-    int lb = 0;
+private static long bboxLowerBound(int[] query, int[] bboxMin, int[] bboxMax) {
+    long lb = 0;
     for (int d = 0; d < DIMS; d++) {
         int q = query[d];
         int lo = bboxMin[d], hi = bboxMax[d];
-        if      (q < lo) { int diff = lo - q; lb += diff * diff; }
-        else if (q > hi) { int diff = q - hi; lb += diff * diff; }
+        if      (q < lo) { long diff = lo - q; lb += diff * diff; }
+        else if (q > hi) { long diff = q - hi; lb += diff * diff; }
         // caso contrário (dentro da faixa) a dimensão contribui 0
     }
     return lb;
 }
 ```
+
+> **Por que `long` e não `int`?** Em i16 uma dimensão pode contribuir até
+> `(32767 − (−32768))² ≈ 4,3 × 10⁹`, e a soma das 14 dimensões chega a ~6 × 10¹⁰ —
+> muito além de `Integer.MAX_VALUE` (~2,1 × 10⁹). Se acumulássemos em `int`, o valor
+> *transbordaria* e o lower bound voltaria **menor** do que a distância real. Aí a
+> garantia `lb ≤ distância(q, p)` quebraria e poderíamos podar um cluster que tinha um
+> vizinho melhor — busca deixaria de ser exata. O `calculateI16` acumula em `long`
+> exatamente pela mesma razão; o lower bound precisa acompanhar. (Em i8 a soma máxima é
+> ~9 × 10⁵ e caberia em `int`, mas usamos `long` para um único código correto nos dois
+> dtypes.)
 
 ### Por que isso é um limite inferior de verdade
 
@@ -256,26 +267,106 @@ podado, então o valor é irrelevante — só não pode quebrar a escrita.
 
 ---
 
-## 7. O que esta issue entrega (e o que fica para a próxima)
+## 7. O algoritmo de busca com poda, passo a passo
 
-Esta issue (04) é **só metade** da V4-A:
+Até aqui falamos da *caixa* e do *critério* de poda. Agora o algoritmo completo, como ele
+roda no `V2IndexSearcher.search()`.
 
-- ✅ **calcula** `bboxMin`/`bboxMax` por cluster no build;
-- ✅ **persiste** no diretório do artefato;
-- ✅ o `V2IndexSearcher` **lê e carrega** as caixas na inicialização.
+O IVF antigo fazia só uma coisa: varrer os `nprobe` clusters mais próximos do centróide e
+parar. A V4-A acrescenta um segundo laço — *iterar todos os clusters restantes, podando os
+que não podem ajudar*. Em pseudocódigo (versão i16; a i8 é simétrica):
 
-Ela **não muda o resultado da busca** — as caixas ficam carregadas mas ainda não são
-usadas. O `bboxLowerBound` e o laço de poda entram na **Issue 05** (query time). Por isso
-o `V2QualityGuardTest` continua idêntico: o comportamento de busca é o mesmo de antes.
+```java
+int[] ranked = rankClusters(q);          // clusters ordenados por distância ao centróide
+TopKSelector selector = new TopKSelector(k);
+int probes = Math.min(nprobe, numClusters);
 
-**Impacto esperado quando a Issue 05 ligar a poda:** zerar os 19 erros de particionamento
-(6 FP + 13 FN), levando o `score_det` do patamar atual (~2501, já alcançado com o i16)
-rumo ao teto, e o `final_score` em direção aos 4.000+ do AndDev741 (que faz 0/0 com
-exatamente esta técnica).
+// 1) Aquecimento: varre os nprobe clusters mais próximos (como o IVF antigo).
+for (int ci = 0; ci < probes; ci++) {
+    scanCluster(ranked[ci], q, selector);
+}
+
+// 2) Poda exata: percorre o RESTANTE, do mais próximo ao mais distante.
+for (int ci = probes; ci < numClusters; ci++) {
+    int cluster = ranked[ci];
+    if (bboxLowerBound(q, bboxMin[cluster], bboxMax[cluster]) > selector.worstDist()) {
+        continue;                        // prova matemática: pular o cluster inteiro
+    }
+    scanCluster(cluster, q, selector);   // não deu pra podar → varre de verdade
+}
+```
+
+Três peças fazem isso funcionar:
+
+**1. `selector.worstDist()` — a régua da poda.** O `TopKSelector` guarda os `k` melhores
+vizinhos até agora; `worstDist()` devolve a distância do k-ésimo (o pior deles). É contra
+essa régua que comparamos o lower bound. Detalhe importante: *enquanto o top-k ainda não
+tem k elementos*, `worstDist()` devolve `Double.MAX_VALUE`. Assim nenhum lower bound é
+maior que ela e **nada é podado até o top-k encher** — exatamente o que queremos (não dá
+para podar com base num top-k incompleto).
+
+**2. A ordem `ranked[]` — do mais perto ao mais longe.** Os clusters restantes são
+visitados na ordem de distância ao centróide. Isso não muda o resultado, mas muda a
+*velocidade*: visitar primeiro os clusters próximos faz o `worstDist` cair rápido (bons
+candidatos entram cedo), e um `worstDist` menor poda mais agressivamente os clusters
+seguintes. É um efeito bola-de-neve a nosso favor.
+
+**3. `nprobe` deixa de afetar a correção.** Esta é a virada conceitual. No IVF antigo,
+`nprobe` controlava *qualidade*: poucos clusters → busca pior. Agora o segundo laço
+considera **todos** os clusters (podando a maioria), então o resultado é sempre o exato,
+**não importa o `nprobe`**. Ele vira só um parâmetro de **aquecimento**: quantos clusters
+varrer "no escuro" antes de começar a podar. Mais aquecimento = top-k inicial melhor =
+mais poda; menos aquecimento = o primeiro lower bound já corta cedo. Em ambos os casos o
+conjunto final de vizinhos é idêntico ao da força bruta.
+
+### Por que isso é seguro mesmo com a query quantizada
+
+O lower bound compara a **query já quantizada** (int) contra a caixa (mesmo espaço, ver
+seção 4), e o resultado é comparado com `worstDist`, que vem do `calculateI8/I16` — também
+inteiro. Tudo no mesmo espaço e na mesma aritmética, então a desigualdade
+`lb ≤ distância real` vale exatamente. A comparação final `lb > worstDist()` promove o
+`long` do lower bound para `double`; como os dois lados são inteiros menores que `2⁵³`, a
+comparação é exata — sem surpresa de ponto flutuante.
+
+### Custo: uma chamada por cluster, zero alocação por candidato
+
+A poda adiciona, por cluster, **um** cálculo de lower bound (14 subtrações/multiplicações).
+Os clusters que sobrevivem à poda são varridos pelo mesmo código de antes — o
+`scanCluster` não aloca nada por vetor (insere direto no `TopKSelector`, herança do V3-D).
+Ou seja: o ganho de "varrer menos vetores" não vem com um novo custo de garbage.
+
+### Como sabemos que ficou *idêntico* à força bruta
+
+O `V2QualityGuardTest` prova isso de forma direta: para cada query ele roda a busca podada
+(`nprobe=2`) **e** o full-scan (`nprobe=K`, que nunca poda) e exige que as duas listas de
+vizinhos sejam **iguais** — mesma distância e mesmo label, na mesma ordem. Se a poda
+removesse por engano um vizinho real, essa igualdade quebraria. Roda verde para i8 e i16,
+com **0 divergências** (ver seção 10).
 
 ---
 
-## 8. Parametrização i8/i16 preservada
+## 8. O que a V4-A entrega
+
+Somando as Issues 04 e 05, a V4-A entrega a fatia completa do bbox pruning:
+
+- ✅ **calcula** `bboxMin`/`bboxMax` por cluster no build (Issue 04);
+- ✅ **persiste** no diretório do artefato (Issue 04);
+- ✅ o `V2IndexSearcher` **lê e carrega** as caixas na inicialização (Issue 04);
+- ✅ o `search()` **usa** as caixas para podar e devolver o top-k **exato** (Issue 05).
+
+A guarda de qualidade, que na Issue 04 só confirmava que nada havia mudado, agora exige
+**busca exata**: 100% de acordo com o full-scan e com o float32 brute-force na fixture, e
+0 divergências de particionamento.
+
+**Impacto esperado no score:** zerar os erros de particionamento (na V3, 6 FP + 13 FN no
+recorte i16; ~105 FP + 102 FN na rodada completa da Rinha), levando o `score_det` rumo ao
+teto e o `final_score` na direção dos 4.000+ do AndDev741, que faz 0/0 com exatamente esta
+técnica. A confirmação empírica em score é o **gate pós-V4-A** (5 boots frios), medido
+fora desta issue.
+
+---
+
+## 9. Parametrização i8/i16 preservada
 
 Mesmo com o i16 escolhido para produção, **mantivemos a parametrização**: tudo funciona
 para os dois dtypes. A caixa é gravada/lida no tamanho certo (14 bytes i8 / 28 i16) com
@@ -285,7 +376,7 @@ benchmarkar e comparar os dois.
 
 ---
 
-## 9. Como reproduzir
+## 10. Como reproduzir
 
 ### Testes (o caminho mais rápido)
 
@@ -301,10 +392,17 @@ mvn -q test -Dtest=V2BboxBuildTest
    **nenhum registro** fica fora da caixa do seu cluster;
 3. confirma que o `V2IndexSearcher` carrega exatamente as mesmas caixas.
 
-A guarda de qualidade continua verde (a busca não mudou):
+A guarda de **exatidão** — agora exige que a busca podada devolva exatamente os mesmos
+vizinhos da força bruta (0 divergências, i8 e i16):
 
 ```bash
 mvn -q test -Dtest=V2QualityGuardTest
+```
+
+E o teste do `worstDist()`, a régua que a poda usa para decidir o corte:
+
+```bash
+mvn -q test -Dtest=TopKSelectorTest
 ```
 
 ### Construir o artefato real e conferir o layout
@@ -334,7 +432,7 @@ docker build --build-arg DTYPE=i16 -t api-i16 .
 
 ---
 
-## 10. Glossário rápido
+## 11. Glossário rápido
 
 - **IVF** — *Inverted File Index*: particiona o espaço em clusters e varre só alguns.
 - **nprobe** — quantos clusters o IVF varre por query.

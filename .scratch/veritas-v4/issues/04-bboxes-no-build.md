@@ -1,6 +1,6 @@
 # Issue 04 — V4-A Passo 2: Bounding boxes no artefato de build
 
-Status: open
+Status: done
 
 ## Issue pai
 
@@ -33,15 +33,15 @@ de retrocompatibilidade com artefatos antigos.
 
 ## Critérios de aceite
 
-- [ ] O artefato gerado inclui `bboxMin` e `bboxMax` para cada cluster.
-- [ ] **Teste de propriedade:** para um artefato de fixture conhecido, nenhum vetor
+- [x] O artefato gerado inclui `bboxMin` e `bboxMax` para cada cluster.
+- [x] **Teste de propriedade:** para um artefato de fixture conhecido, nenhum vetor
       atribuído a um cluster tem qualquer dimensão menor que `bboxMin[cluster][d]`
       nem maior que `bboxMax[cluster][d]`. Cobre todos os clusters da fixture.
-- [ ] O `V2IndexSearcher` lê e carrega os bboxes sem erro.
-- [ ] O `CLUSTER_ENTRY_SIZE` atualizado reflete o novo layout (58 i8 / 100 i16).
-- [ ] `V2QualityGuardTest` e testes existentes permanecem verdes (os bboxes ainda
+- [x] O `V2IndexSearcher` lê e carrega os bboxes sem erro.
+- [x] O `CLUSTER_ENTRY_SIZE` atualizado reflete o novo layout (58 i8 / 100 i16).
+- [x] `V2QualityGuardTest` e testes existentes permanecem verdes (os bboxes ainda
       não afetam o resultado da busca; o pruning é da Issue 05).
-- [ ] O tempo de build não aumenta de forma significativa (os bboxes são calculados
+- [x] O tempo de build não aumenta de forma significativa (os bboxes são calculados
       na passagem que já ocorre, sem iteração extra).
 
 ## Bloqueada por

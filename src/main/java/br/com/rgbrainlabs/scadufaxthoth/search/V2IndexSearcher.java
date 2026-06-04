@@ -93,33 +93,88 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
         if (dtype == V2ArtifactBuilder.DTYPE_I16) {
             short[] q16 = toI16Query(qi);
+            // Aquecimento: varre os nprobe clusters mais próximos do centróide.
             for (int ci = 0; ci < probes; ci++) {
+                scanClusterI16(ranked[ci], q16, selector);
+            }
+            // Poda exata (desigualdade triangular): itera o restante em ordem de
+            // distância ao centróide; pula o cluster inteiro quando seu lower-bound
+            // geométrico já é pior que o k-ésimo vizinho atual.
+            for (int ci = probes; ci < numClusters; ci++) {
                 int cluster = ranked[ci];
-                long blockStart = dataOffset + offsets[cluster];
-                int blockCount = counts[cluster];
-                for (int i = 0; i < blockCount; i++) {
-                    long recordBase = blockStart + (long) i * recordSize;
-                    double dist = calculator.calculateI16(q16, file, recordBase + 1, DIMS);
-                    byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
-                    selector.tryInsert(dist, labelByte);
+                if (bboxLowerBound(qi, bboxMin[cluster], bboxMax[cluster]) > selector.worstDist()) {
+                    continue;
                 }
+                scanClusterI16(cluster, q16, selector);
             }
         } else {
             byte[] q8 = toI8Query(qi);
             for (int ci = 0; ci < probes; ci++) {
+                scanClusterI8(ranked[ci], q8, selector);
+            }
+            for (int ci = probes; ci < numClusters; ci++) {
                 int cluster = ranked[ci];
-                long blockStart = dataOffset + offsets[cluster];
-                int blockCount = counts[cluster];
-                for (int i = 0; i < blockCount; i++) {
-                    long recordBase = blockStart + (long) i * recordSize;
-                    double dist = calculator.calculateI8(q8, file, recordBase + 1, DIMS);
-                    byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
-                    selector.tryInsert(dist, labelByte);
+                if (bboxLowerBound(qi, bboxMin[cluster], bboxMax[cluster]) > selector.worstDist()) {
+                    continue;
                 }
+                scanClusterI8(cluster, q8, selector);
             }
         }
 
         return selector.materialize();
+    }
+
+    /** Varre os registros do cluster (i16) inserindo cada um no top-k. Zero alocação por candidato. */
+    private void scanClusterI16(int cluster, short[] q16, TopKSelector selector) {
+        long blockStart = dataOffset + offsets[cluster];
+        int blockCount = counts[cluster];
+        for (int i = 0; i < blockCount; i++) {
+            long recordBase = blockStart + (long) i * recordSize;
+            double dist = calculator.calculateI16(q16, file, recordBase + 1, DIMS);
+            byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+            selector.tryInsert(dist, labelByte);
+        }
+    }
+
+    /** Varre os registros do cluster (i8) inserindo cada um no top-k. Zero alocação por candidato. */
+    private void scanClusterI8(int cluster, byte[] q8, TopKSelector selector) {
+        long blockStart = dataOffset + offsets[cluster];
+        int blockCount = counts[cluster];
+        for (int i = 0; i < blockCount; i++) {
+            long recordBase = blockStart + (long) i * recordSize;
+            double dist = calculator.calculateI8(q8, file, recordBase + 1, DIMS);
+            byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+            selector.tryInsert(dist, labelByte);
+        }
+    }
+
+    /**
+     * Lower-bound geométrico: menor distância euclidiana ao quadrado possível entre a
+     * query e qualquer ponto dentro da bounding box do cluster. Por dimensão: 0 se a
+     * query cai na faixa [min, max]; caso contrário, o quadrado da folga até o lado
+     * mais próximo. Soma sobre as DIMS dimensões.
+     *
+     * Acumula em long (não int): em i16 a soma pode chegar a ~5,6×10⁹ e ultrapassar
+     * Integer.MAX_VALUE — igual ao calculateI16. Truncar para int daria um lower-bound
+     * menor que a distância real e quebraria a exatidão da poda. A comparação com
+     * worstDist() (double) é exata: ambos são inteiros menores que 2^53.
+     */
+    private static long bboxLowerBound(int[] query, int[] bboxMin, int[] bboxMax) {
+        long lb = 0;
+        for (int d = 0; d < DIMS; d++) {
+            int q = query[d];
+            int lo = bboxMin[d];
+            int hi = bboxMax[d];
+            if (q < lo) {
+                long diff = lo - q;
+                lb += diff * diff;
+            } else if (q > hi) {
+                long diff = q - hi;
+                lb += diff * diff;
+            }
+            // dentro da faixa [lo, hi]: a dimensão contribui 0
+        }
+        return lb;
     }
 
     @Override
