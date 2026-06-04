@@ -1,0 +1,33 @@
+{
+  "dtype": "i8",
+  "runs": 2,
+  "p99_ms": {
+    "median": 209.964,
+    "min": 51.85417239999978,
+    "max": 368.07295451999863,
+    "samples": [
+      51.85417239999978,
+      368.07295451999863
+    ]
+  },
+  "p99": "210ms",
+  "scoring": {
+    "p99_score": {
+      "value": 859.645,
+      "cut_triggered": false
+    },
+    "detection_score": {
+      "value": 1366.54,
+      "cut_triggered": false
+    },
+    "final_score": 2226.18,
+    "failure_rate": 0.365,
+    "breakdown": {
+      "true_positive_detections": 23777,
+      "false_positive_detections": 102,
+      "true_negative_detections": 29928.5,
+      "false_negative_detections": 93.5
+    }
+  },
+  "final_score_median": 2226.18
+}

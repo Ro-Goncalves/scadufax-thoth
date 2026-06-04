@@ -8,42 +8,42 @@
     "edge_case_count": 645,
     "edge_case_rate": 0.0119
   },
-  "p50": "0.68ms",
-  "p95": "2.66ms",
-  "p99": "36.38ms",
+  "p50": "0.87ms",
+  "p95": "36.28ms",
+  "p99": "368.07ms",
   "scoring": {
     "breakdown": {
-      "false_positive_detections": 106,
-      "false_negative_detections": 102,
-      "true_positive_detections": 23840,
-      "true_negative_detections": 30011,
-      "http_errors": 0
+      "false_positive_detections": 102,
+      "false_negative_detections": 93,
+      "true_positive_detections": 23706,
+      "true_negative_detections": 29842,
+      "http_errors": 2
     },
-    "failure_rate": "0.38%",
-    "weighted_errors_E": 412,
-    "error_rate_epsilon": 0.007621,
+    "failure_rate": "0.37%",
+    "weighted_errors_E": 391,
+    "error_rate_epsilon": 0.007275,
     "p99_score": {
-      "value": 1439.16,
+      "value": 434.07,
       "cut_triggered": false
     },
     "detection_score": {
-      "value": 1333.19,
-      "rate_component": 2117.97,
-      "absolute_penalty": -784.79,
+      "value": 1360.18,
+      "rate_component": 2138.16,
+      "absolute_penalty": -777.99,
       "cut_triggered": false
     },
-    "final_score": 2772.35,
+    "final_score": 1794.24,
     "raw": {
-      "p50_ms": 0.678108,
-      "p95_ms": 2.658032899999999,
-      "p99_ms": 36.377862759999985,
-      "failure_rate": 0.0038476479402134705,
-      "error_rate_epsilon": 0.007621302650807451,
-      "p99_score": 1439.1628198081075,
-      "detection_score": 1333.1857761941253,
-      "rate_component": 2117.9707916910456,
-      "absolute_penalty": -784.7850154969203,
-      "final_score": 2772.3485960022326
+      "p50_ms": 0.867579,
+      "p95_ms": 36.28405439999983,
+      "p99_ms": 368.07295451999863,
+      "failure_rate": 0.0036654572518373804,
+      "error_rate_epsilon": 0.007275095357707694,
+      "p99_score": 434.06609272514333,
+      "detection_score": 1360.175489719788,
+      "rate_component": 2138.161309825925,
+      "absolute_penalty": -777.9858201061371,
+      "final_score": 1794.2415824449313
     }
   }
 }

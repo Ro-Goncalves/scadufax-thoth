@@ -8,42 +8,42 @@
     "edge_case_count": 645,
     "edge_case_rate": 0.0119
   },
-  "p50": "0.79ms",
-  "p95": "32.65ms",
-  "p99": "78.21ms",
+  "p50": "0.84ms",
+  "p95": "3.42ms",
+  "p99": "51.85ms",
   "scoring": {
     "breakdown": {
-      "false_positive_detections": 106,
-      "false_negative_detections": 102,
-      "true_positive_detections": 23837,
-      "true_negative_detections": 30006,
+      "false_positive_detections": 102,
+      "false_negative_detections": 94,
+      "true_positive_detections": 23848,
+      "true_negative_detections": 30015,
       "http_errors": 0
     },
-    "failure_rate": "0.38%",
-    "weighted_errors_E": 412,
-    "error_rate_epsilon": 0.007622,
+    "failure_rate": "0.36%",
+    "weighted_errors_E": 384,
+    "error_rate_epsilon": 0.007103,
     "p99_score": {
-      "value": 1106.76,
+      "value": 1285.22,
       "cut_triggered": false
     },
     "detection_score": {
-      "value": 1333.12,
-      "rate_component": 2117.91,
-      "absolute_penalty": -784.79,
+      "value": 1372.9,
+      "rate_component": 2148.54,
+      "absolute_penalty": -775.64,
       "cut_triggered": false
     },
-    "final_score": 2439.88,
+    "final_score": 2658.11,
     "raw": {
-      "p50_ms": 0.787784,
-      "p95_ms": 32.647346999999996,
-      "p99_ms": 78.205849,
-      "failure_rate": 0.0038482174242844723,
-      "error_rate_epsilon": 0.007622430667332704,
-      "p99_score": 1106.7607649269526,
-      "detection_score": 1333.1215017354896,
-      "rate_component": 2117.90651723241,
-      "absolute_penalty": -784.7850154969203,
-      "final_score": 2439.882266662442
+      "p50_ms": 0.842951,
+      "p95_ms": 3.4249259,
+      "p99_ms": 51.85417239999978,
+      "failure_rate": 0.003625668251355001,
+      "error_rate_epsilon": 0.007103350043471022,
+      "p99_score": 1285.2162927485808,
+      "detection_score": 1372.898564504099,
+      "rate_component": 2148.5367833566493,
+      "absolute_penalty": -775.6382188525502,
+      "final_score": 2658.11485725268
     }
   }
 }
