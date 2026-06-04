@@ -8,17 +8,19 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.zip.GZIPInputStream;
 
 /**
  * Gera o artefato binário V2 — um único arquivo com layout:
  *
- *   [Header 24 bytes] → [Diretório de Clusters K×30 bytes] → [Blocos de Registros]
+ *   [Header 24 bytes] → [Diretório de Clusters K×58 (i8) | K×100 (i16) bytes] → [Blocos de Registros]
  *
  * Diferença da Issue 01: agora o builder executa K-means (Lloyd's int8) e escreve
- * um cluster por grupo. O diretório de clusters carrega centróide real, offset e
- * count de cada bloco. O V2IndexSearcher usa esse diretório para IVF real.
+ * um cluster por grupo. O diretório de clusters carrega centróide real, radius,
+ * offset, count e a bounding box (bboxMin/bboxMax por dimensão) de cada bloco.
+ * O V2IndexSearcher usa esse diretório para IVF real e poda geométrica (V4-A).
  *
  * Uso:
  *   java ...V2ArtifactBuilder <input.json.gz> <output.v2> [numClusters] [iterations] [seed]
@@ -35,8 +37,8 @@ public final class V2ArtifactBuilder {
     public static final int  SCALE_I16     = 10_000;
 
     public static final int HEADER_SIZE             = 24; // 1+2+1+4+8+8
-    public static final int CLUSTER_ENTRY_SIZE      = 30; // 14(centróide)+4(radius)+8(offset)+4(count)
-    public static final int CLUSTER_ENTRY_SIZE_I16  = 44; // 28(centróide)+4(radius)+8(offset)+4(count)
+    public static final int CLUSTER_ENTRY_SIZE      = 58; // 14(centróide)+4(radius)+8(offset)+4(count)+14(bboxMin)+14(bboxMax)
+    public static final int CLUSTER_ENTRY_SIZE_I16  = 100; // 28(centróide)+4(radius)+8(offset)+4(count)+28(bboxMin)+28(bboxMax)
     public static final int RECORD_SIZE             = 16; // 1(label)+14(vetor i8)+1(padding)
     public static final int RECORD_SIZE_I16         = 30; // 1(label)+28(vetor i16)+1(padding)
 
@@ -198,6 +200,17 @@ public final class V2ArtifactBuilder {
             clusterBuffers[c] = new byte[clusterCount[c] * recordSize];
         }
 
+        // Bounding box por cluster, no espaço do dtype do artefato (os mesmos valores
+        // quantizados dos registros gravados). O lower bound em runtime compara a query
+        // quantizada contra estes limites, então a bbox precisa viver no mesmo espaço.
+        // Calculada na própria passagem de distribuição: nenhuma iteração extra.
+        int[][] bboxMin = new int[actualK][DIMS];
+        int[][] bboxMax = new int[actualK][DIMS];
+        for (int c = 0; c < actualK; c++) {
+            Arrays.fill(bboxMin[c], Integer.MAX_VALUE);
+            Arrays.fill(bboxMax[c], Integer.MIN_VALUE);
+        }
+
         try (InputStream tmpIn = new BufferedInputStream(Files.newInputStream(tempRecords), 1 << 20)) {
             byte[] rec = new byte[recordSize];
             for (int i = 0; i < n; i++) {
@@ -206,6 +219,24 @@ public final class V2ArtifactBuilder {
                 int c = assignments[i];
                 System.arraycopy(rec, 0, clusterBuffers[c], writePos[c], recordSize);
                 writePos[c] += recordSize;
+
+                // Atualiza a bbox decodificando o vetor do registro (offset 1 = após o label)
+                int[] lo = bboxMin[c];
+                int[] hi = bboxMax[c];
+                for (int d = 0; d < DIMS; d++) {
+                    int v = (dtype == Dtype.I16) ? decodeI16(rec, 1 + d * 2) : rec[1 + d];
+                    if (v < lo[d]) lo[d] = v;
+                    if (v > hi[d]) hi[d] = v;
+                }
+            }
+        }
+
+        // Clusters vazios (K-means usa min(k,n) e pode deixar count==0): zera a bbox
+        // para o cast a byte/short não estourar. O bloco vazio nunca é varrido.
+        for (int c = 0; c < actualK; c++) {
+            if (clusterCount[c] == 0) {
+                Arrays.fill(bboxMin[c], 0);
+                Arrays.fill(bboxMax[c], 0);
             }
         }
 
@@ -235,6 +266,15 @@ public final class V2ArtifactBuilder {
                 dos.writeFloat(Float.MAX_VALUE);                   // radius (não usado no IVF)
                 dos.writeLong(clusterOffset[c]);                   // offset relativo a dataOffset
                 dos.writeInt(clusterCount[c]);                     // quantidade de registros
+
+                // bboxMin e bboxMax no mesmo encoding do centróide (i8: bytes; i16: shorts LE)
+                if (dtype == Dtype.I16) {
+                    writeBoxI16(dos, bboxMin[c]);
+                    writeBoxI16(dos, bboxMax[c]);
+                } else {
+                    writeBoxI8(dos, bboxMin[c]);
+                    writeBoxI8(dos, bboxMax[c]);
+                }
             }
 
             dos.flush();
@@ -298,6 +338,29 @@ public final class V2ArtifactBuilder {
             }
             dst[dstOffset + d * 2]     = (byte)  (s & 0xFF);
             dst[dstOffset + d * 2 + 1] = (byte) ((s >> 8) & 0xFF);
+        }
+    }
+
+    /** Lê um short LE (2 bytes a partir de off) de um registro e devolve widened para int. */
+    private static int decodeI16(byte[] rec, int off) {
+        int lo = rec[off]     & 0xFF;
+        int hi = rec[off + 1] & 0xFF;
+        return (short) (lo | (hi << 8));
+    }
+
+    /** Grava uma bounding box i8 (14 bytes sinalizados). */
+    private static void writeBoxI8(DataOutputStream dos, int[] box) throws IOException {
+        for (int d = 0; d < DIMS; d++) {
+            dos.writeByte(box[d]);
+        }
+    }
+
+    /** Grava uma bounding box i16 (28 bytes, shorts little-endian — igual ao centróide). */
+    private static void writeBoxI16(DataOutputStream dos, int[] box) throws IOException {
+        for (int d = 0; d < DIMS; d++) {
+            short s = (short) box[d];
+            dos.writeByte(s & 0xFF);
+            dos.writeByte((s >> 8) & 0xFF);
         }
     }
 }

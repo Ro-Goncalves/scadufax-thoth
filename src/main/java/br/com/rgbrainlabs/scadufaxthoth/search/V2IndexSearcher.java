@@ -27,10 +27,10 @@ import java.util.List;
  * o comportamento é equivalente ao brute force da Issue 01.
  *
  * Layout i8 (dtype=1):
- *   [Header 24 bytes] [Diretório: K × 30 bytes] [Registros: 16 bytes cada]
+ *   [Header 24 bytes] [Diretório: K × 58 bytes] [Registros: 16 bytes cada]
  *
  * Layout i16 (dtype=2):
- *   [Header 24 bytes] [Diretório: K × 44 bytes] [Registros: 30 bytes cada]
+ *   [Header 24 bytes] [Diretório: K × 100 bytes] [Registros: 30 bytes cada]
  */
 public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
@@ -47,6 +47,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     private final int[][] centroids; // widened de byte (i8) ou short (i16) — unifica centroidDist
     private final int[] counts; // registros por cluster
     private final long[] offsets; // offsets relativos ao dataOffset
+    private final int[][] bboxMin; // limite inferior por dimensão (espaço do dtype) — poda V4-A
+    private final int[][] bboxMax; // limite superior por dimensão (espaço do dtype) — poda V4-A
     private final Arena arena;
     private final MemorySegment file;
     private final DistanceCalculator calculator;
@@ -71,6 +73,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         this.centroids = header.centroids;
         this.counts = header.counts;
         this.offsets = header.offsets;
+        this.bboxMin = header.bboxMin;
+        this.bboxMax = header.bboxMax;
 
         try (FileChannel ch = FileChannel.open(artifactPath, StandardOpenOption.READ)) {
             this.file = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size(), arena);
@@ -121,6 +125,16 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     @Override
     public void close() {
         arena.close();
+    }
+
+    /** Bounding box inferior por cluster (espaço do dtype). Pacote-privado para teste/poda V4-A. */
+    int[][] bboxMin() {
+        return bboxMin;
+    }
+
+    /** Bounding box superior por cluster (espaço do dtype). Pacote-privado para teste/poda V4-A. */
+    int[][] bboxMax() {
+        return bboxMax;
     }
 
     /**
@@ -212,7 +226,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     // ── Leitura do cabeçalho e diretório ─────────────────────────────────────────
 
     private record Header(int numClusters, long dataOffset, byte dtype,
-            int[][] centroids, int[] counts, long[] offsets) {
+            int[][] centroids, int[] counts, long[] offsets,
+            int[][] bboxMin, int[][] bboxMax) {
     }
 
     private static Header readHeader(Path artifactPath) throws IOException {
@@ -234,31 +249,44 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
             dis.readLong(); // clusterDirOffset — imediatamente após header
             long dataOffset = dis.readLong();
 
-            int[][] centroids = new int[numClusters][dims];
+            int[][] centroids = new int[numClusters][];
             int[] counts = new int[numClusters];
             long[] offsets = new long[numClusters];
+            int[][] bboxMin = new int[numClusters][];
+            int[][] bboxMax = new int[numClusters][];
 
             for (int c = 0; c < numClusters; c++) {
-                if (dtype == V2ArtifactBuilder.DTYPE_I16) {
-                    // Centróide como shorts LE (28 bytes = 14 × 2)
-                    for (int d = 0; d < dims; d++) {
-                        int lo = dis.readByte() & 0xFF;
-                        int hi = dis.readByte() & 0xFF;
-                        centroids[c][d] = (short) (lo | (hi << 8)); // widen para int
-                    }
-                } else {
-                    // Centróide como bytes signed (14 bytes)
-                    for (int d = 0; d < dims; d++) {
-                        centroids[c][d] = dis.readByte(); // widen signed byte → int
-                    }
-                }
+                centroids[c] = readVector(dis, dims, dtype);
                 dis.readFloat(); // radius — ignorado no IVF por distância
                 offsets[c] = dis.readLong();
                 counts[c] = dis.readInt();
+                bboxMin[c] = readVector(dis, dims, dtype); // limites da bbox, mesmo encoding do centróide
+                bboxMax[c] = readVector(dis, dims, dtype);
             }
 
-            return new Header(numClusters, dataOffset, dtype, centroids, counts, offsets);
+            return new Header(numClusters, dataOffset, dtype, centroids, counts, offsets,
+                    bboxMin, bboxMax);
         }
+    }
+
+    /**
+     * Lê um vetor de {@code dims} componentes do diretório: bytes signed (i8) ou
+     * shorts little-endian (i16). Usado para o centróide e para os limites da bbox.
+     */
+    private static int[] readVector(DataInputStream dis, int dims, byte dtype) throws IOException {
+        int[] v = new int[dims];
+        if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+            for (int d = 0; d < dims; d++) {
+                int lo = dis.readByte() & 0xFF;
+                int hi = dis.readByte() & 0xFF;
+                v[d] = (short) (lo | (hi << 8)); // widen LE short → int
+            }
+        } else {
+            for (int d = 0; d < dims; d++) {
+                v[d] = dis.readByte(); // widen signed byte → int
+            }
+        }
+        return v;
     }
 
     /**
