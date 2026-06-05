@@ -6,22 +6,12 @@ import br.com.rgbrainlabs.scadufaxthoth.search.EuclideanDistanceCalculator;
 import br.com.rgbrainlabs.scadufaxthoth.search.V2IndexSearcher;
 import br.com.rgbrainlabs.scadufaxthoth.web.FraudRequestParser;
 import br.com.rgbrainlabs.scadufaxthoth.web.PreSerializedResponseTable;
-import br.com.rgbrainlabs.scadufaxthoth.web.ReadyHandler;
-import br.com.rgbrainlabs.scadufaxthoth.web.SearchHandler;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.PropertyNamingStrategies;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import io.javalin.Javalin;
-import io.javalin.json.JavalinJackson;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.BufferedOutputStream;
 import java.io.OutputStream;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -105,48 +95,30 @@ class V2IvfSearchTest {
         writeGz(gz, FIXTURE_JSON);
         V2ArtifactBuilder.build(gz, artifact, 3, 10, 0L);
 
-        V2IndexSearcher searcher = new V2IndexSearcher(artifact, new EuclideanDistanceCalculator(), 2);
         FraudRequestParser parser = new FraudRequestParser(normMap(), Map.of());
-
         PreSerializedResponseTable responseTable = new PreSerializedResponseTable(5, 0.6);
-        SearchHandler searchHandler = new SearchHandler(searcher, parser, responseTable);
-        ReadyHandler  readyHandler  = new ReadyHandler();
 
-        Javalin app = Javalin.create(cfg -> {
-            cfg.jsonMapper(new JavalinJackson().updateMapper(m -> {
-                m.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
-                m.findAndRegisterModules();
-                m.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-                m.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
-            }));
-            cfg.routes.post("/fraud-score", searchHandler);
-            cfg.routes.get("/ready",        readyHandler);
-            cfg.events.serverStopped(searcher::close);
-        }).start(0);
+        // End-to-end do caminho de runtime (parse → search → resposta pré-serializada),
+        // sem servidor HTTP — a camada HTTP (NioHttpServer) é coberta por V2EndToEndTest.
+        try (V2IndexSearcher searcher =
+                     new V2IndexSearcher(artifact, new EuclideanDistanceCalculator(), 2)) {
+            float[] vec = new float[V2ArtifactBuilder.DIMS];
+            byte[] body = payload().getBytes(StandardCharsets.UTF_8);
+            parser.parse(body, body.length, vec);
 
-        int port = app.port();
-        HttpClient http = HttpClient.newHttpClient();
+            List<SearchResult> topK = searcher.search(vec, responseTable.k());
+            int fraudCount = 0;
+            for (SearchResult r : topK) {
+                if ("fraud".equals(r.label())) fraudCount++;
+            }
 
-        try {
-            HttpResponse<String> resp = post(http, port, payload());
-            assertEquals(200, resp.statusCode(), "Deve retornar HTTP 200");
-            assertTrue(resp.body().contains("approved"),    "Resposta deve ter 'approved'");
-            assertTrue(resp.body().contains("fraud_score"), "Resposta deve ter 'fraud_score'");
-        } finally {
-            app.stop();
+            String json = new String(responseTable.get(fraudCount), StandardCharsets.UTF_8);
+            assertTrue(json.contains("approved"),    "Resposta deve ter 'approved'");
+            assertTrue(json.contains("fraud_score"), "Resposta deve ter 'fraud_score'");
         }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
-
-    private static HttpResponse<String> post(HttpClient client, int port, String body) throws Exception {
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/fraud-score"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-        return client.send(req, HttpResponse.BodyHandlers.ofString());
-    }
 
     private static void writeGz(Path dest, String json) throws Exception {
         try (OutputStream os = new GZIPOutputStream(

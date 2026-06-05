@@ -12,7 +12,7 @@ services:
       resources:
         limits:
           cpus: '0.45'
-          memory: '165MB'
+          memory: '145MB'
 
   api02:
     build: .
@@ -27,7 +27,7 @@ services:
       resources:
         limits:
           cpus: '0.45'
-          memory: '165MB'
+          memory: '145MB'
 
   lb:
     image: haproxy:lts-alpine
@@ -43,4 +43,8 @@ services:
       resources:
         limits:
           cpus: '0.10'
-          memory: '20MB'
+          # 60MB: o modo splice (haproxy.cfg) aloca ~31MB de pipes de kernel
+          # sob 250 conexões concorrentes; 20MB era morto por OOM (exit 137).
+          # Compensado reduzindo api01/api02 de 165→145MB (usam ~54MB+mmap).
+          # Total da stack permanece 145+145+60 = 350MB.
+          memory: '60MB'

@@ -4,19 +4,15 @@ import br.com.rgbrainlabs.scadufaxthoth.prep.V2ArtifactBuilder;
 import br.com.rgbrainlabs.scadufaxthoth.search.EuclideanDistanceCalculator;
 import br.com.rgbrainlabs.scadufaxthoth.search.V2IndexSearcher;
 import br.com.rgbrainlabs.scadufaxthoth.web.FraudRequestParser;
+import br.com.rgbrainlabs.scadufaxthoth.web.NioHttpServer;
 import br.com.rgbrainlabs.scadufaxthoth.web.PreSerializedResponseTable;
-import br.com.rgbrainlabs.scadufaxthoth.web.ReadyHandler;
-import br.com.rgbrainlabs.scadufaxthoth.web.SearchHandler;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.PropertyNamingStrategies;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import io.javalin.Javalin;
-import io.javalin.json.JavalinJackson;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.BufferedOutputStream;
+import java.io.IOException;
 import java.io.OutputStream;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -29,27 +25,17 @@ import java.util.zip.GZIPOutputStream;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Valida o caminho completo da Issue 01:
+ * Valida o caminho completo:
  *
- *   build → bootstrap → requisição HTTP
+ *   build → bootstrap (NioHttpServer) → requisição HTTP
  *
- * Cobre os três critérios de aceite:
+ * Cobre:
  *   1. V2ArtifactBuilder gera um artefato válido.
- *   2. V2IndexSearcher sobe e o endpoint /fraud-score responde.
- *   3. Um caso com last_transaction ausente (sentinela −128) é tratado sem erro.
+ *   2. V2IndexSearcher + NioHttpServer sobem e o endpoint /fraud-score responde.
+ *   3. Um caso com last_transaction ausente (sentinela) é tratado sem erro.
  */
 class V2EndToEndTest {
 
-    // Dataset de fixture: 6 vetores, só a primeira dimensão varia.
-    // Mistura de fraud e legítimo para exercitar o cálculo de fraud_score.
-    //
-    //   idx  | first dim | label
-    //    0   |   0.0     | legitimate
-    //    1   |   0.1     | legitimate
-    //    2   |   0.2     | legitimate
-    //    3   |   0.6     | fraud
-    //    4   |   0.8     | fraud
-    //    5   |   1.0     | fraud
     private static final String FIXTURE_JSON = buildFixtureJson();
 
     @Test
@@ -65,53 +51,67 @@ class V2EndToEndTest {
         V2ArtifactBuilder.build(gz, artifact);
 
         assertTrue(Files.exists(artifact), "Artefato V2 deve existir após o build");
-        // header(24) + 6 clusters×58 + 6 registros×16 (i8, pós-V4-A com bboxes)
-        // (K-means cap: actualK = min(256, 6) = 6)
         assertEquals(24 + 6 * V2ArtifactBuilder.CLUSTER_ENTRY_SIZE + 6 * 16L, Files.size(artifact),
                 "Tamanho do artefato deve ser exato: header + clusters + registros");
 
-        // ── 2. Bootstrap: cria o searcher e sobe o Javalin ──────────────────────
+        // ── 2. Bootstrap: searcher + NioHttpServer numa porta livre ─────────────
         V2IndexSearcher searcher = new V2IndexSearcher(artifact, new EuclideanDistanceCalculator());
         FraudRequestParser parser = new FraudRequestParser(normMap(), Map.of());
-
         PreSerializedResponseTable responseTable = new PreSerializedResponseTable(5, 0.6);
-        SearchHandler searchHandler = new SearchHandler(searcher, parser, responseTable);
-        ReadyHandler  readyHandler  = new ReadyHandler();
 
-        Javalin app = Javalin.create(cfg -> {
-            cfg.jsonMapper(new JavalinJackson().updateMapper(m -> {
-                m.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
-                m.findAndRegisterModules();
-                m.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-                m.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
-            }));
-            cfg.routes.post("/fraud-score", searchHandler);
-            cfg.routes.get("/ready",        readyHandler);
-            cfg.events.serverStopped(searcher::close);
-        }).start(0); // porta 0 = SO escolhe uma porta livre
+        int port = freePort();
+        NioHttpServer server = new NioHttpServer(port, searcher, parser, responseTable);
+        Thread serverThread = new Thread(() -> {
+            try { server.run(); } catch (IOException ignored) { }
+        }, "nio-test-server");
+        serverThread.setDaemon(true);
+        serverThread.start();
 
-        int port = app.port();
         HttpClient http = HttpClient.newHttpClient();
-
         try {
+            waitReady(http, port);
+
             // ── 3a. Requisição normal ────────────────────────────────────────────
             HttpResponse<String> resp = post(http, port, payloadComLastTransaction());
             assertEquals(200, resp.statusCode(), "Deve retornar HTTP 200");
             assertTrue(resp.body().contains("approved"),    "Resposta deve ter campo 'approved'");
             assertTrue(resp.body().contains("fraud_score"), "Resposta deve ter campo 'fraud_score'");
 
-            // ── 3b. Caso com last_transaction ausente (sentinela −128) ───────────
+            // ── 3b. last_transaction ausente ─────────────────────────────────────
             HttpResponse<String> respSentinela = post(http, port, payloadSemLastTransaction());
             assertEquals(200, respSentinela.statusCode(),
                     "Deve retornar HTTP 200 mesmo com last_transaction nulo");
             assertTrue(respSentinela.body().contains("fraud_score"),
                     "Resposta com sentinela deve ter campo 'fraud_score'");
         } finally {
-            app.stop();
+            server.close();
+            searcher.close();
         }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────
+
+    private static int freePort() throws IOException {
+        try (ServerSocket s = new ServerSocket(0)) {
+            return s.getLocalPort();
+        }
+    }
+
+    private static void waitReady(HttpClient client, int port) throws Exception {
+        for (int i = 0; i < 100; i++) {
+            try {
+                HttpRequest req = HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/ready"))
+                        .GET().build();
+                HttpResponse<String> r = client.send(req, HttpResponse.BodyHandlers.ofString());
+                if (r.statusCode() == 200) return;
+            } catch (IOException ignored) {
+                // servidor ainda subindo
+            }
+            Thread.sleep(50);
+        }
+        fail("Servidor não ficou pronto a tempo");
+    }
 
     private static HttpResponse<String> post(HttpClient client, int port, String body) throws Exception {
         HttpRequest req = HttpRequest.newBuilder()
@@ -148,7 +148,6 @@ class V2EndToEndTest {
                 """;
     }
 
-    /** Mapa de normalização com os mesmos defaults do AppConfig. */
     private static Map<String, Float> normMap() {
         return Map.of(
                 "max_amount",              10_000f,
@@ -161,7 +160,6 @@ class V2EndToEndTest {
         );
     }
 
-    /** Monta o JSON do dataset de fixture (6 registros com 14 dimensões cada). */
     private static String buildFixtureJson() {
         float[] firstDims = {0.0f, 0.1f, 0.2f, 0.6f, 0.8f, 1.0f};
         String[]  labels    = {"legitimate", "legitimate", "legitimate", "fraud", "fraud", "fraud"};
