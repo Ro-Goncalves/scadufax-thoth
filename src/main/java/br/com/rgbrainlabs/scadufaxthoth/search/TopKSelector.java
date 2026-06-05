@@ -12,7 +12,8 @@ import java.util.List;
  * (distância e label byte). Nenhum objeto é alocado por candidato varrido; a
  * construção de SearchResult e String de label ocorre uma única vez em materialize().
  *
- * Arrays são locais à chamada — sem estado compartilhado entre requisições.
+ * Opera sobre arrays fornecidos externamente — sem alocação no construtor.
+ * Reutilizável entre requisições via reset().
  */
 public final class TopKSelector {
 
@@ -21,11 +22,18 @@ public final class TopKSelector {
     private final int k;
     private int size;
 
-    public TopKSelector(int k) {
-        this.k = k;
-        this.topDist = new double[k];
-        this.topLabel = new byte[k];
-        this.size = 0;
+    /** Constrói o seletor operando sobre os arrays externos fornecidos. */
+    public TopKSelector(double[] topDist, byte[] topLabel) {
+        this.topDist  = topDist;
+        this.topLabel = topLabel;
+        this.k        = topDist.length;
+        this.size     = 0;
+        java.util.Arrays.fill(topDist, Double.MAX_VALUE);
+    }
+
+    /** Restaura o estado inicial: size=0 e topDist preenchido com Double.MAX_VALUE. */
+    public void reset() {
+        size = 0;
         java.util.Arrays.fill(topDist, Double.MAX_VALUE);
     }
 

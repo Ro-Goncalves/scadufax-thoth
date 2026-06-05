@@ -41,7 +41,7 @@ class TopKSelectorTest {
             lbls[i] = (byte) (rng.nextBoolean() ? 1 : 0);
         }
 
-        TopKSelector selector = new TopKSelector(k);
+        TopKSelector selector = new TopKSelector(new double[k], new byte[k]);
         for (int i = 0; i < n; i++) selector.tryInsert(dists[i], lbls[i]);
         List<SearchResult> got = selector.materialize();
 
@@ -59,7 +59,7 @@ class TopKSelectorTest {
     @Test
     void menosCandidatosQueK_retornaTodosInseridos() {
         int k = 10;
-        TopKSelector selector = new TopKSelector(k);
+        TopKSelector selector = new TopKSelector(new double[k], new byte[k]);
         selector.tryInsert(3.0, (byte) 0);
         selector.tryInsert(1.0, (byte) 1);
         selector.tryInsert(2.0, (byte) 0);
@@ -79,7 +79,7 @@ class TopKSelectorTest {
         double[] dists = {4.0, 2.0, 3.0, 1.0};
         byte[] lbls   = {0,   1,   0,   1};
 
-        TopKSelector selector = new TopKSelector(k);
+        TopKSelector selector = new TopKSelector(new double[k], new byte[k]);
         for (int i = 0; i < k; i++) selector.tryInsert(dists[i], lbls[i]);
         List<SearchResult> results = selector.materialize();
 
@@ -91,7 +91,7 @@ class TopKSelectorTest {
     @Test
     void empatesDeDistancia_naoGeraMaisQueKResultados() {
         int k = 3;
-        TopKSelector selector = new TopKSelector(k);
+        TopKSelector selector = new TopKSelector(new double[k], new byte[k]);
         for (int i = 0; i < 10; i++) selector.tryInsert(5.0, (byte) 0);
 
         List<SearchResult> results = selector.materialize();
@@ -102,7 +102,7 @@ class TopKSelectorTest {
 
     @Test
     void kIgualA1_retornaApenasOMaisProximo() {
-        TopKSelector selector = new TopKSelector(1);
+        TopKSelector selector = new TopKSelector(new double[1], new byte[1]);
         selector.tryInsert(10.0, (byte) 0);
         selector.tryInsert(2.0, (byte) 1);
         selector.tryInsert(7.0, (byte) 0);
@@ -116,13 +116,13 @@ class TopKSelectorTest {
 
     @Test
     void nenhumaCandidatoInserido_retornaListaVazia() {
-        TopKSelector selector = new TopKSelector(5);
+        TopKSelector selector = new TopKSelector(new double[5], new byte[5]);
         assertTrue(selector.materialize().isEmpty());
     }
 
     @Test
     void labelsCorretamenteMaterializados() {
-        TopKSelector selector = new TopKSelector(2);
+        TopKSelector selector = new TopKSelector(new double[2], new byte[2]);
         selector.tryInsert(1.0, (byte) 1);   // fraud
         selector.tryInsert(2.0, (byte) 0);   // legitimate
 
@@ -135,7 +135,7 @@ class TopKSelectorTest {
     @Test
     void worstDist_retornaTopDistKMenos1EEvoluiComCandidatosMelhores() {
         int k = 3;
-        TopKSelector selector = new TopKSelector(k);
+        TopKSelector selector = new TopKSelector(new double[k], new byte[k]);
 
         // Sem candidatos: o slot k-1 ainda é o sentinela de inicialização.
         assertEquals(Double.MAX_VALUE, selector.worstDist(),
@@ -166,5 +166,31 @@ class TopKSelectorTest {
         selector.tryInsert(99.0, (byte) 0);
         assertEquals(6.0, selector.worstDist(),
                 "Candidato pior que o k-ésimo não muda worstDist");
+    }
+
+    @Test
+    void reset_restauraEstadoInicial() {
+        double[] dist  = new double[3];
+        byte[]   label = new byte  [3];
+        TopKSelector sel = new TopKSelector(dist, label);
+        sel.tryInsert(1.0, (byte) 1);
+        sel.tryInsert(2.0, (byte) 0);
+
+        sel.reset();
+
+        assertEquals(Double.MAX_VALUE, sel.worstDist(),
+                "Após reset, worstDist deve ser Double.MAX_VALUE");
+        assertTrue(sel.materialize().isEmpty(),
+                "Após reset, materialize deve retornar lista vazia");
+
+        // Inserções após reset devem produzir resultado idêntico a seletor recém-criado
+        TopKSelector fresh = new TopKSelector(new double[3], new byte[3]);
+        sel.tryInsert(5.0, (byte) 1);
+        fresh.tryInsert(5.0, (byte) 1);
+        List<SearchResult> afterReset = sel.materialize();
+        List<SearchResult> fromFresh  = fresh.materialize();
+        assertEquals(fromFresh.size(), afterReset.size());
+        assertEquals(fromFresh.get(0).distance(), afterReset.get(0).distance(), 1e-12);
+        assertEquals(fromFresh.get(0).label(),    afterReset.get(0).label());
     }
 }

@@ -91,7 +91,7 @@ public final class QuantizedBruteForceSearcher implements VectorSearcher, AutoCl
 
     @Override
     public List<SearchResult> search(float[] queryVector, int k) {
-        TopKSelector selector = new TopKSelector(k);
+        TopKSelector selector = new TopKSelector(new double[k], new byte[k]);
         if (dtype == Dtype.I8) {
             searchI8(queryVector, selector);
         } else {
