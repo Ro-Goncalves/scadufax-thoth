@@ -11,7 +11,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class PreSerializedResponseTableTest {
 
@@ -28,14 +28,16 @@ class PreSerializedResponseTableTest {
     @MethodSource("provideKThresholdCases")
     void tabelaMatchesJacksonReference(int k, double threshold, String desc) throws Exception {
         ObjectMapper mapper = configuredMapper();
-        PreSerializedResponseTable table = new PreSerializedResponseTable(k, threshold, mapper);
+        PreSerializedResponseTable table = new PreSerializedResponseTable(k, threshold);
 
         for (int i = 0; i <= k; i++) {
             double score = (double) i / k;
             boolean approved = score < threshold;
-            byte[] expected = mapper.writeValueAsBytes(new TransactionResponse(approved, score));
-            assertArrayEquals(expected, table.get(i),
-                    "k=%d threshold=%f fraudCount=%d".formatted(k, threshold, i));
+            TransactionResponse actual = mapper.readValue(table.get(i), TransactionResponse.class);
+            assertEquals(approved, actual.approved(),
+                    "k=%d threshold=%f fraudCount=%d approved".formatted(k, threshold, i));
+            assertEquals(score, actual.fraud_score(), 1e-9,
+                    "k=%d threshold=%f fraudCount=%d fraud_score".formatted(k, threshold, i));
         }
     }
 

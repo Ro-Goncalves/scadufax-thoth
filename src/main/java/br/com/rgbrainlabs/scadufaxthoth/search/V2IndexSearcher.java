@@ -1,7 +1,6 @@
 package br.com.rgbrainlabs.scadufaxthoth.search;
 
 import br.com.rgbrainlabs.scadufaxthoth.domain.SearchResult;
-import br.com.rgbrainlabs.scadufaxthoth.prep.V2ArtifactBuilder;
 
 import java.io.*;
 import java.lang.foreign.Arena;
@@ -34,8 +33,16 @@ import java.util.List;
  */
 public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
-    private static final int DIMS         = V2ArtifactBuilder.DIMS;
-    private static final int K_NEIGHBORS  = 5;
+    // Constantes do formato binário V2 — espelham V2ArtifactBuilder que vive em src/test.
+    private static final byte VERSION        = 2;
+    private static final byte DTYPE_I8       = 1;
+    private static final byte DTYPE_I16      = 2;
+    private static final int  DIMS           = 14;
+    private static final int  SCALE          = 127;
+    private static final int  SCALE_I16      = 10_000;
+    private static final int  RECORD_SIZE    = 16;  // 1(label)+14(i8)+1(padding)
+    private static final int  RECORD_SIZE_I16 = 30; // 1(label)+28(i16)+1(padding)
+    private static final int  K_NEIGHBORS    = 5;
 
     private static volatile long PREWARM_SINK = 0;
 
@@ -70,8 +77,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         this.numClusters = header.numClusters;
         this.dataOffset = header.dataOffset;
         this.dtype = header.dtype;
-        this.scale = (dtype == V2ArtifactBuilder.DTYPE_I16) ? V2ArtifactBuilder.SCALE_I16 : V2ArtifactBuilder.SCALE;
-        this.recordSize = (dtype == V2ArtifactBuilder.DTYPE_I16) ? V2ArtifactBuilder.RECORD_SIZE_I16 : V2ArtifactBuilder.RECORD_SIZE;
+        this.scale = (dtype == DTYPE_I16) ? SCALE_I16 : SCALE;
+        this.recordSize = (dtype == DTYPE_I16) ? RECORD_SIZE_I16 : RECORD_SIZE;
         this.centroids = header.centroids;
         this.counts = header.counts;
         this.offsets = header.offsets;
@@ -98,7 +105,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
         int probes = Math.min(nprobe, numClusters);
 
-        if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+        if (dtype == DTYPE_I16) {
             toI16Query(s.qi, s.q16);
             // Aquecimento: varre os nprobe clusters mais próximos do centróide.
             for (int ci = 0; ci < probes; ci++) {
@@ -289,13 +296,13 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
                 DataInputStream dis = new DataInputStream(raw)) {
 
             byte version = dis.readByte();
-            if (version != V2ArtifactBuilder.VERSION) {
+            if (version != VERSION) {
                 throw new IllegalStateException(
                         "Artefato V2 esperado (versão 2), encontrado: " + version);
             }
             short dims = dis.readShort();
             byte dtype = dis.readByte();
-            if (dtype != V2ArtifactBuilder.DTYPE_I8 && dtype != V2ArtifactBuilder.DTYPE_I16) {
+            if (dtype != DTYPE_I8 && dtype != DTYPE_I16) {
                 throw new IllegalStateException(
                         "dtype desconhecido (esperado 1=i8 ou 2=i16), encontrado: " + dtype);
             }
@@ -358,7 +365,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
      */
     private static int[] readVector(DataInputStream dis, int dims, byte dtype) throws IOException {
         int[] v = new int[dims];
-        if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+        if (dtype == DTYPE_I16) {
             for (int d = 0; d < dims; d++) {
                 int lo = dis.readByte() & 0xFF;
                 int hi = dis.readByte() & 0xFF;
@@ -381,10 +388,10 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         for (int d = 0; d < DIMS; d++) {
             float val = v[d];
             if (val == -1.0f) {
-                dest[d] = (dtype == V2ArtifactBuilder.DTYPE_I16) ? Short.MIN_VALUE : Byte.MIN_VALUE;
+                dest[d] = (dtype == DTYPE_I16) ? Short.MIN_VALUE : Byte.MIN_VALUE;
             } else {
                 int r = Math.round(val * scale);
-                if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+                if (dtype == DTYPE_I16) {
                     if (r < -32767) r = -32767;
                     if (r >  32767) r =  32767;
                 } else {
