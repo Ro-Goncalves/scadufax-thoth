@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import io.javalin.Javalin;
+import org.eclipse.jetty.util.thread.QueuedThreadPool;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -55,7 +56,16 @@ public final class JavalinBootstrap {
         // JavalinJackson não é registrado como mapper HTTP — ctx.bodyAsClass() não é
         // mais usado; FraudRequestParser parseia os bytes diretamente no hot path.
         return Javalin.create(javalinConfig -> {
-            javalinConfig.concurrency.useVirtualThreads = true;
+            // Pool pequeno de platform threads — NÃO virtual threads. O workload é
+            // CPU-bound num container de 0,45 CPU / 165 MB; virtual-thread-por-requisição
+            // degradou o benchmark (p99 40ms→1116ms) porque os ThreadLocal de
+            // ParseState/queryVector deixam de reaproveitar e a retenção por thread
+            // empilha sob carga. Com pool fixo o ThreadLocal volta a ser zero-alocação.
+            // maxThreads=16 cobre a infra do Jetty + workers sem estourar os stacks de
+            // platform thread no orçamento de 165 MB; minThreads=4. Afinável no benchmark.
+            // Ver docs/knowledge/v4/07-postmortem-parser-virtual-threads.md.
+            javalinConfig.concurrency.useVirtualThreads = false;
+            javalinConfig.jetty.threadPool = new QueuedThreadPool(16, 4);
             javalinConfig.startup.showJavalinBanner = false;
             javalinConfig.events.serverStopped(searcher::close);
 
