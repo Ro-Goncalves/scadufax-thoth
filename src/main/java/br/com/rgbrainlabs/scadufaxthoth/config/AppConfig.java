@@ -1,10 +1,11 @@
 package br.com.rgbrainlabs.scadufaxthoth.config;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public record AppConfig(
         int port,
@@ -25,6 +26,10 @@ public record AppConfig(
     private static final String DEFAULT_K_NEIGHBORS      = "5";
     private static final String DEFAULT_FRAUD_THRESHOLD  = "0.6";
 
+    // Captura "key": number — suporta inteiros e floats no formato dos dois JSONs de recursos.
+    static final Pattern ENTRY_PATTERN =
+            Pattern.compile("\"([^\"]+)\"\\s*:\\s*([0-9.eE+\\-]+)");
+
     public static AppConfig fromEnvironment() {
         int    port           = Integer.parseInt(System.getenv().getOrDefault("PORT",             DEFAULT_PORT));
         String datasetPath    = System.getenv().getOrDefault("DATASET_PATH",   DEFAULT_DATASET_PATH);
@@ -34,20 +39,28 @@ public record AppConfig(
         int    kNeighbors     = Integer.parseInt(System.getenv().getOrDefault("K_NEIGHBORS",      DEFAULT_K_NEIGHBORS));
         double fraudThreshold = Double.parseDouble(System.getenv().getOrDefault("FRAUD_THRESHOLD", DEFAULT_FRAUD_THRESHOLD));
 
-        ObjectMapper bootMapper = new ObjectMapper();
-        Map<String, Float> normMap = loadMapFromJar(bootMapper, "/normalization.json");
-        Map<String, Float> mccMap  = loadMapFromJar(bootMapper, "/mcc_risk.json");
+        Map<String, Float> normMap = loadMapFromJar("/normalization.json");
+        Map<String, Float> mccMap  = loadMapFromJar("/mcc_risk.json");
 
         return new AppConfig(port, datasetPath, dataDir, v2Path, normMap, mccMap,
                              nprobe, kNeighbors, fraudThreshold);
     }
 
-    private static Map<String, Float> loadMapFromJar(ObjectMapper mapper, String resourcePath) {
+    static Map<String, Float> parseFloatMap(String json) {
+        Map<String, Float> map = new LinkedHashMap<>();
+        Matcher m = ENTRY_PATTERN.matcher(json);
+        while (m.find()) {
+            map.put(m.group(1), Float.parseFloat(m.group(2)));
+        }
+        return map;
+    }
+
+    private static Map<String, Float> loadMapFromJar(String resourcePath) {
         try (InputStream is = AppConfig.class.getResourceAsStream(resourcePath)) {
             if (is == null) {
                 throw new IllegalArgumentException("Arquivo não encontrado no JAR: " + resourcePath);
             }
-            return mapper.readValue(is, new TypeReference<Map<String, Float>>() {});
+            return parseFloatMap(new String(is.readAllBytes(), StandardCharsets.UTF_8));
         } catch (Exception e) {
             throw new RuntimeException("Falha catastrófica ao carregar " + resourcePath, e);
         }
