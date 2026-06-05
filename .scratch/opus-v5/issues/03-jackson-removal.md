@@ -1,6 +1,6 @@
 # Issue 03: Remoção do Jackson em AppConfig
 
-Status: ready-for-agent
+Status: ✓ done
 
 ## Issue pai
 
@@ -29,14 +29,14 @@ para os mesmos arquivos de recursos.
 
 ## Critérios de aceite
 
-- [ ] `mvn -q compile` passa sem erros
-- [ ] `mvn test` verde, incluindo o novo `AppConfigTest`
-- [ ] `AppConfigTest` verifica `normalization.json` e `mcc_risk.json` chave a chave
+- [x] `mvn -q compile` passa sem erros
+- [x] `mvn test` verde, incluindo o novo `AppConfigTest`
+- [x] `AppConfigTest` verifica `normalization.json` e `mcc_risk.json` chave a chave
   com tolerância 1e-6
-- [ ] `mvn dependency:tree` não lista `jackson-databind` fora de escopo `test`
-- [ ] `docker compose up` sobe e smoke K6 conclui verde (a remoção do Jackson não
+- [x] `mvn dependency:tree` não lista `jackson-databind` fora de escopo `test`
+- [x] `docker compose up` sobe e smoke K6 conclui verde (a remoção do Jackson não
   altera o comportamento em runtime)
-- [ ] Nenhuma importação de `com.fasterxml.jackson` fora do escopo de test no
+- [x] Nenhuma importação de `com.fasterxml.jackson` fora do escopo de test no
   código principal
 
 ## Bloqueada por
