@@ -234,6 +234,36 @@ Técnica chave: ISO-8601 → epoch seconds sem `Instant`/`ZonedDateTime`, usando
 algoritmo de Howard Hinnant (daysFromCivil). O caller passa `float[]` pré-alocado;
 o parser escreve in-place — zero `new` no hot path.
 
+**✅ ENTREGUE (com regressão corrigida).** `FraudRequestParser` implementado;
+`JavalinJackson` removido como mapper HTTP; 56/56 testes verdes. **Porém o `ThreadLocal`
+de zero-alocação colidiu com `useVirtualThreads = true` e degradou o benchmark**
+(p99 40 ms → 1116 ms; `final_score` +4394 → −1329). Correção: desligar virtual threads e
+usar pool pequeno de platform threads (o `ThreadLocal` volta a reaproveitar). Autópsia
+completa em `docs/knowledge/v4/07-postmortem-parser-virtual-threads.md`. Detalhes de
+parsing em `docs/knowledge/v4/06-parser-json-custom.md`.
+
+**Por que o parser produz `float[14]` e não `int16` diretamente:**
+`float32` é o espaço lógico do domínio — valores normalizados em `[0, 1]` com sentinela
+`-1.0f`. A quantização para int8/int16 é responsabilidade do `V2IndexSearcher.quantizeQuery()`,
+que conhece o `dtype` e o `scale` do artefato. O parser não deve conhecer detalhes de
+armazenamento. Parsear em int16 economizaria ~50–100 ns de aritmética por requisição —
+negligenciável frente ao p99 de ~40 ms.
+
+**Alocações residuais no `V2IndexSearcher.search()` (próxima micro-otimização):**
+Após o parser, o caminho quente ainda aloca por requisição:
+- `quantizeQuery()` → `new int[14]`
+- `toI16Query()` → `new short[14]`
+- `rankClusters()` → `new long[K]` + `new int[K]` (~16 KB para K=1024)
+
+Padrão de correção: `ThreadLocal<SearchState>` em `V2IndexSearcher`, exatamente como o
+`ParseState` no parser. Candidato à Issue 08 ou parte da Issue 07 (benchmark rigoroso).
+
+> ⚠️ **Pré-condição:** este `ThreadLocal<SearchState>` só é seguro **depois** de desligar
+> as virtual threads (Opção 1, ver `v4/07-postmortem-parser-virtual-threads.md`). Sob
+> virtual-thread-por-requisição ele reproduziria a mesma regressão do `ParseState`. Com
+> pool fixo de platform threads o padrão reaproveita e fica correto — mas a ordem importa:
+> corrigir o modelo de threads primeiro.
+
 ### V4-D: Insertion sort para K=5 — ✅ JÁ ENTREGUE NA V3-D
 
 > Antecipado para a V3 e entregue (commit do V3-D). Detalhes em
