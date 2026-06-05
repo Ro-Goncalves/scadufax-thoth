@@ -32,9 +32,9 @@ docker compose version &>/dev/null || { echo "Erro: 'docker compose' (v2) não e
 
 # ── Matriz de experimentos ────────────────────────────────────────────────────
 DTYPE_VALUES=(${DTYPE_VALUES:-i16})
-K_VALUES=(${K_VALUES:-2048})
-NPROBE_VALUES=(${NPROBE_VALUES:-1 2 4 6})
-RUNS="${RUNS:-3}"               # boots frios por config
+K_VALUES=(${K_VALUES:-2048 4096})
+NPROBE_VALUES=(${NPROBE_VALUES:-2 4 6})
+RUNS="${RUNS:-1}"               # boots frios por config
 SETTLE_SECS="${SETTLE_SECS:-10}" # pausa entre rodadas para o host assentar
 
 RESULTS_DIR="${RESULTS_DIR:-benchmark-results}"
