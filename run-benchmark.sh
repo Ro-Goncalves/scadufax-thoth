@@ -24,6 +24,12 @@
 
 set -euo pipefail
 
+# ── Pré-requisitos ────────────────────────────────────────────────────────────
+for _dep in docker jq curl awk; do
+  command -v "$_dep" &>/dev/null || { echo "Erro: '$_dep' não encontrado. Instale e tente novamente."; exit 1; }
+done
+docker compose version &>/dev/null || { echo "Erro: 'docker compose' (v2) não encontrado."; exit 1; }
+
 # ── Matriz de experimentos ────────────────────────────────────────────────────
 DTYPE_VALUES=(${DTYPE_VALUES:-i16})
 K_VALUES=(${K_VALUES:-1024 2048 4096})
@@ -185,6 +191,12 @@ for DTYPE in "${DTYPE_VALUES[@]}"; do
         if [[ "$v" == "true" ]]; then CUT_DET_ANY="true"; break; fi
       done
 
+      if [ "${#P99_VALUES[@]}" -gt 0 ]; then
+        P99_JSON=$(printf '%s\n' "${P99_VALUES[@]}" | jq -R 'tonumber' | jq -s '.')
+      else
+        P99_JSON='[]'
+      fi
+
       jq -n \
         --arg  dtype        "$DTYPE"             \
         --argjson runs      "${#P99_VALUES[@]}"  \
@@ -201,7 +213,7 @@ for DTYPE in "${DTYPE_VALUES[@]}"; do
         --arg  fr_med       "$FAILRATE_MED"      \
         --argjson cut_p99   "$CUT_P99_ANY"       \
         --argjson cut_det   "$CUT_DET_ANY"       \
-        --argjson p99_list  "$(printf '%s\n' "${P99_VALUES[@]:-}" | jq -R 'select(length>0)|tonumber' | jq -s '.')" \
+        --argjson p99_list  "$P99_JSON"          \
         '{
           dtype: $dtype,
           runs: $runs,
@@ -224,7 +236,7 @@ for DTYPE in "${DTYPE_VALUES[@]}"; do
           },
           final_score_median: ($score_med | tonumber?)
         }' \
-        > "$RUN_DIR/aggregate.json" 2>/dev/null || true
+        > "$RUN_DIR/aggregate.json" || log "AVISO: falha ao gravar aggregate.json para $RUN_DIR"
 
       # Guarda para a tabela de comparação
       COMPARE_KEY="${DTYPE}_K${K}_nprobe${NPROBE}"
