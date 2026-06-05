@@ -8,9 +8,6 @@ import br.com.rgbrainlabs.scadufaxthoth.web.PreSerializedResponseTable;
 import br.com.rgbrainlabs.scadufaxthoth.web.ReadyHandler;
 import br.com.rgbrainlabs.scadufaxthoth.web.SearchHandler;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.PropertyNamingStrategies;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import io.javalin.Javalin;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
 
@@ -41,14 +38,8 @@ public final class JavalinBootstrap {
         searcher.prewarm();
         WarmupService.warmup(searcher, parser);
 
-        // sharedMapper: usado apenas pelo PreSerializedResponseTable no boot (cold path)
-        ObjectMapper sharedMapper = new ObjectMapper();
-        sharedMapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
-        sharedMapper.findAndRegisterModules();
-        sharedMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-
         PreSerializedResponseTable responseTable = new PreSerializedResponseTable(
-                config.kNeighbors(), config.fraudThreshold(), sharedMapper);
+                config.kNeighbors(), config.fraudThreshold());
 
         SearchHandler searchHandler = new SearchHandler(searcher, parser, responseTable);
         ReadyHandler readyHandler = new ReadyHandler();
