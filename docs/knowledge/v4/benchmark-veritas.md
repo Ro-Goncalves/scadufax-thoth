@@ -299,3 +299,66 @@ clusters não visitados pelo IVF com nprobe=4. São o alvo do Passo 2+3 (boundin
 pruning), que itera todos os clusters e poda geometricamente.
 
 **Decisão: i16 adotado definitivamente. Próximo passo: Passo 2 — bboxes no build.**
+
+---
+
+# Veritas V4-A: Poda Exata por Bounding-Box (Issue 05)
+
+Data: 2026-06-04. Envelope: K=1024 / nprobe=4. Protocolo: 2 boots frios (run1 + run2);
+medição rigorosa de 5 rodadas pendente (Issue 07).
+
+## i16 (SCALE=10.000) com poda exata — K=1024 / nprobe=4
+
+| Run | p50 | p95 | p99 | FP | FN | score_det | final_score |
+|---|---|---|---|---|---|---|---|
+| run1 | 0.91ms | 3.46ms | 44.09ms | 0 | 0 | 3000.00 | 4355.69 |
+| run2 | 0.91ms | 3.11ms | 36.92ms | 0 | 0 | 3000.00 | 4432.79 |
+| **mediana** | **0.91ms** | **3.29ms** | **40.50ms** | — | — | **3000.00** | **4394.24** |
+
+A poda eliminou os **19 erros residuais** (6 FP + 13 FN) que sobraram após a migração
+para i16 — queries na fronteira de cluster cujos vizinhos reais estavam em clusters
+não visitados pelo IVF com nprobe=4. O `score_det` atingiu **3.000** (teto do scoring).
+
+## i8 (SCALE=127) com poda exata — K=1024 / nprobe=4
+
+| Run | p50 | p95 | p99 | FP | FN | score_det | final_score |
+|---|---|---|---|---|---|---|---|
+| run1 | 0.84ms | 3.42ms | 51.85ms | 102 | 94 | 1372.90 | 2658.11 |
+| run2 | 0.87ms | 36.28ms | 368.07ms | 102 | 93 | 1360.18 | 1794.24 |
+
+A poda não elimina os erros de i8 — eles são de quantização (não de particionamento).
+A busca é exata no espaço quantizado i8; como SCALE=127 não representa com fidelidade
+as diferenças de distância float32, os FP/FN persistem inalterados. Run2 sofreu
+instabilidade de ambiente (p99=368ms, 2 erros HTTP) e não é representativo.
+
+## Comparativo com baseline pré-poda (i16, medianas)
+
+| Métrica | Pré-poda (Passo 1) | Pós-poda (V4-A) | Delta |
+|---|---|---|---|
+| p50 | 0.71ms | 0.91ms | +0.20ms |
+| p95 | 2.68ms | 3.29ms | +0.61ms |
+| p99 | 34.25ms | 40.50ms | +6.25ms |
+| FP | 6 | **0** | −100% |
+| FN | 13 | **0** | −100% |
+| Total erros | 19 | **0** | **−100%** |
+| score_det | 2501.17 | **3000.00** | **+19.9%** |
+| final_score | 3966.51 | **4394.24** | **+10.8%** |
+
+Nota: a mediana pré-poda é de 5 rodadas; a pós-poda é de 2 rodadas. O custo de p99
+(+6ms) está dentro do regime saudável e parcialmente explicado pelo número menor de
+amostras — o spread pré-poda era 17.95–48.54ms, e o pós-poda 36.92–44.09ms é
+mais estreito.
+
+## Conclusão
+
+A poda por bounding-box tornou a busca IVF **provadamente exata** para i16: todos os
+19 erros residuais foram eliminados e o `score_det` atingiu o teto do sistema (3.000).
+O custo de latência é marginal — a cauda continua na faixa de 37–44ms, dentro do
+regime saudável da V3/V4.
+
+**Diagnóstico cruzado com i8:** a poda não melhora a detecção do i8, confirmando que
+seus 102 FP / 93–94 FN são de quantização, não de particionamento. A migração para
+i16 (Passo 1) era condição necessária para que a poda tivesse efeito.
+
+**Próximo passo: Issue 07 — 5 boots frios rigorosos** para confirmar a mediana e o
+spread com o envelope pós-poda e decidir o roadmap V5/V6 com base nos números reais.

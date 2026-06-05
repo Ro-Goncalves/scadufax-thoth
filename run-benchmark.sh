@@ -25,11 +25,11 @@
 set -euo pipefail
 
 # ── Matriz de experimentos ────────────────────────────────────────────────────
-DTYPE_VALUES=(${DTYPE_VALUES:-i8 i16})
-K_VALUES=(${K_VALUES:-1024})
-NPROBE_VALUES=(${NPROBE_VALUES:-4})
-RUNS="${RUNS:-5}"               # boots frios por config
-SETTLE_SECS="${SETTLE_SECS:-5}" # pausa entre rodadas para o host assentar
+DTYPE_VALUES=(${DTYPE_VALUES:-i16})
+K_VALUES=(${K_VALUES:-1024 2048 4096})
+NPROBE_VALUES=(${NPROBE_VALUES:-2 4 6})
+RUNS="${RUNS:-3}"               # boots frios por config
+SETTLE_SECS="${SETTLE_SECS:-10}" # pausa entre rodadas para o host assentar
 
 RESULTS_DIR="${RESULTS_DIR:-benchmark-results}"
 READY_URL="http://localhost:9999/ready"
