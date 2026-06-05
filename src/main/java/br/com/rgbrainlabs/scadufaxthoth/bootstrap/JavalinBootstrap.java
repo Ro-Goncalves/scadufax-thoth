@@ -61,11 +61,11 @@ public final class JavalinBootstrap {
             // degradou o benchmark (p99 40ms→1116ms) porque os ThreadLocal de
             // ParseState/queryVector deixam de reaproveitar e a retenção por thread
             // empilha sob carga. Com pool fixo o ThreadLocal volta a ser zero-alocação.
-            // maxThreads=16 cobre a infra do Jetty + workers sem estourar os stacks de
-            // platform thread no orçamento de 165 MB; minThreads=4. Afinável no benchmark.
-            // Ver docs/knowledge/v4/07-postmortem-parser-virtual-threads.md.
+            // maxThreads=8: Lei de Little com ~15ms e 500 req/s por instância indica ~7–8
+            // threads em voo; reduz context-switch no container fixado a 1 core (0,45 vCPU).
+            // minThreads=2. Ver docs/knowledge/v4/07-postmortem-parser-virtual-threads.md.
             javalinConfig.concurrency.useVirtualThreads = false;
-            javalinConfig.jetty.threadPool = new QueuedThreadPool(16, 4);
+            javalinConfig.jetty.threadPool = new QueuedThreadPool(8, 2);
             javalinConfig.startup.showJavalinBanner = false;
             javalinConfig.events.serverStopped(searcher::close);
 
