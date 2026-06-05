@@ -8,7 +8,6 @@ import br.com.rgbrainlabs.scadufaxthoth.web.PreSerializedResponseTable;
 import br.com.rgbrainlabs.scadufaxthoth.web.ReadyHandler;
 import br.com.rgbrainlabs.scadufaxthoth.web.SearchHandler;
 import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import io.javalin.Javalin;
@@ -75,12 +74,7 @@ class V2EndToEndTest {
         V2IndexSearcher searcher = new V2IndexSearcher(artifact, new EuclideanDistanceCalculator());
         FraudRequestParser parser = new FraudRequestParser(normMap(), Map.of());
 
-        ObjectMapper testMapper = new ObjectMapper();
-        testMapper.setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
-        testMapper.findAndRegisterModules();
-        testMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        testMapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
-        PreSerializedResponseTable responseTable = new PreSerializedResponseTable(5, 0.6, testMapper);
+        PreSerializedResponseTable responseTable = new PreSerializedResponseTable(5, 0.6);
         SearchHandler searchHandler = new SearchHandler(searcher, parser, responseTable);
         ReadyHandler  readyHandler  = new ReadyHandler();
 
