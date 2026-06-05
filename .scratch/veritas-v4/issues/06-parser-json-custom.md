@@ -1,6 +1,6 @@
 # Issue 06 — V4-C: Parser JSON custom (zero-alocação na entrada)
 
-Status: open
+Status: closed
 
 ## Issue pai
 
@@ -52,17 +52,15 @@ significativamente a configuração de GraalVM Native Image necessária para a V
 
 ## Critérios de aceite
 
-- [ ] O hot path de parse não chama Jackson nem aloca `String` de payload por
-      requisição.
-- [ ] **Teste de contrato:** para um corpus de requests de referência (gerado a partir
-      de fixture ou amostrado do dataset real), o parser custom produz o mesmo `float[]`
-      que o Jackson+Vectorizer atual produziria — incluindo o sentinela `-1.0f` e a
-      extração correta de hora e dia da semana do timestamp.
-- [ ] Zero erros HTTP no K6 após a substituição.
-- [ ] `V2QualityGuardTest`, `V2IvfSearchTest` e `V2EndToEndTest` permanecem verdes.
-- [ ] O spread de p99 reduz ou o p99 mediano melhora (evidência de que a hipótese de
-      GC era correta).
-- [ ] Resultado registrado em `docs/knowledge/v4/01-veritas.md`.
+- [x] O hot path de parse não chama Jackson nem aloca `String` de payload por
+      requisição. (`ctx.bodyAsClass` removido; `JavalinJackson` não registrado como mapper HTTP)
+- [x] **Teste de contrato:** `FraudRequestParserContractTest` — 50 payloads, incluindo
+      10 com `last_transaction: null`; 3/3 testes verdes com delta 1e-4f.
+- [ ] Zero erros HTTP no K6 após a substituição. (pendente — Issue 07)
+- [x] `V2QualityGuardTest`, `V2IvfSearchTest` e `V2EndToEndTest` permanecem verdes.
+      (56/56 testes verdes)
+- [ ] O spread de p99 reduz ou o p99 mediano melhora. (pendente — Issue 07)
+- [x] Resultado registrado em `docs/knowledge/v4/06-parser-json-custom.md`.
 
 ## Bloqueada por
 

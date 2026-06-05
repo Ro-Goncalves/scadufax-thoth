@@ -1,22 +1,20 @@
 package br.com.rgbrainlabs.scadufaxthoth.bootstrap;
 
 import br.com.rgbrainlabs.scadufaxthoth.domain.SearchResult;
-import br.com.rgbrainlabs.scadufaxthoth.domain.TransactionRequest;
-import br.com.rgbrainlabs.scadufaxthoth.search.TransactionVectorizer;
 import br.com.rgbrainlabs.scadufaxthoth.search.VectorSearcher;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import br.com.rgbrainlabs.scadufaxthoth.web.FraudRequestParser;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
  * Aquece o hot path de busca antes de /ready estar disponível.
  *
  * Usa example-payloads.json (embutido no JAR) como corpus de queries sintéticas
- * para forçar a compilação JIT (C2) do caminho exato — vetorização + busca — que
+ * para forçar a compilação JIT (C2) do caminho exato — parse + vetorização + busca — que
  * o tráfego real vai exercitar.
  *
  * <h2>Por que detecção de platô em vez de um número fixo de buscas?</h2>
@@ -38,6 +36,12 @@ import java.util.List;
  * não acionar as mesmas rotas de código (seleção de clusters no IVF, ramos do
  * insertion sort do top-k) que queries reais acionam. Payloads reais garantem que o
  * C2 compile exatamente o bytecode que o tráfego vai bater.
+ *
+ * <h2>Por que carregar payloads como bytes brutos?</h2>
+ *
+ * O warmup agora usa FraudRequestParser diretamente, executando o caminho exato
+ * do hot path de produção (parse + vetorização fundidos). Carregar os payloads
+ * como byte[] evita Jackson no loop de aquecimento.
  */
 public final class WarmupService {
 
@@ -46,20 +50,18 @@ public final class WarmupService {
 
     /**
      * Piso de buscas. Garante ultrapassar o limiar de compilação C2 (~10k invocações)
-     * mesmo que a latência pareça estável cedo por ruído de medição. Sobrescreve com
-     * {@code WARMUP_MIN_SEARCHES}.
+     * mesmo que a latência pareça estável cedo por ruído de medição.
      */
     private static final int MIN_SEARCHES = envInt("WARMUP_MIN_SEARCHES", 12_000);
 
     /**
      * Teto de buscas. Evita prender a partida indefinidamente num host onde a latência
-     * nunca platô claramente. Sobrescreve com {@code WARMUP_MAX_SEARCHES}.
+     * nunca platô claramente.
      */
     private static final int MAX_SEARCHES = envInt("WARMUP_MAX_SEARCHES", 400_000);
 
     /**
-     * Teto de tempo (ms). Limite absoluto da partida no container capado. Sobrescreve
-     * com {@code WARMUP_MAX_MS}.
+     * Teto de tempo (ms). Limite absoluto da partida no container capado.
      */
     private static final long MAX_DURATION_MS = envInt("WARMUP_MAX_MS", 25_000);
 
@@ -73,12 +75,15 @@ public final class WarmupService {
     @SuppressWarnings("unused")
     private static volatile long blackhole;
 
+    private static final ThreadLocal<float[]> WARMUP_VEC =
+            ThreadLocal.withInitial(() -> new float[14]);
+
     private WarmupService() {}
 
-    public static void warmup(VectorSearcher searcher, TransactionVectorizer vectorizer) {
+    public static void warmup(VectorSearcher searcher, FraudRequestParser parser) {
         long t0 = System.currentTimeMillis();
 
-        List<TransactionRequest> payloads = loadPayloads();
+        List<byte[]> payloads = loadPayloadBytes();
         if (payloads == null || payloads.isEmpty()) {
             System.out.println("[warmup] nenhum payload disponível; pulando warmup.");
             return;
@@ -95,11 +100,12 @@ public final class WarmupService {
         while (true) {
             long windowStart = System.nanoTime();
             for (int i = 0; i < WINDOW_SIZE; i++) {
-                TransactionRequest req = payloads.get(payloadIdx);
+                byte[] payloadBytes = payloads.get(payloadIdx);
                 if (++payloadIdx >= payloads.size()) {
                     payloadIdx = 0;
                 }
-                float[] vec = vectorizer.vectorize(req);
+                float[] vec = WARMUP_VEC.get();
+                parser.parse(payloadBytes, payloadBytes.length, vec);
                 List<SearchResult> results = searcher.search(vec, 5);
                 // Consumir o resultado para que o caminho não seja eliminado pelo JIT.
                 localBlackhole += results.size();
@@ -147,21 +153,63 @@ public final class WarmupService {
                 System.currentTimeMillis() - t0, stopReason, totalSearches, prevWindowAvgNs / 1_000.0);
     }
 
-    private static List<TransactionRequest> loadPayloads() {
-        ObjectMapper mapper = new ObjectMapper()
-                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-                .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
-
+    /**
+     * Lê example-payloads.json e extrai cada objeto JSON de nível superior como byte[].
+     * Usa contagem de profundidade de chaves — sem Jackson, sem alocação além dos arrays
+     * de bytes extraídos (operação de startup única).
+     */
+    private static List<byte[]> loadPayloadBytes() {
         try (InputStream is = WarmupService.class.getResourceAsStream("/example-payloads.json")) {
             if (is == null) {
                 System.out.println("[warmup] example-payloads.json não encontrado.");
                 return null;
             }
-            return mapper.readValue(is, new TypeReference<>() {});
+            byte[] raw = is.readAllBytes();
+            return splitJsonObjects(raw);
         } catch (Exception e) {
             System.out.println("[warmup] falha ao carregar payloads: " + e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Divide um array JSON (ex.: [{...},{...}]) nos objetos de nível superior,
+     * retornando cada um como byte[]. Startup-only; não precisa ser zero-alocação.
+     */
+    static List<byte[]> splitJsonObjects(byte[] raw) {
+        List<byte[]> result = new ArrayList<>();
+        int i = 0;
+        int len = raw.length;
+
+        // avança até o '[' do array raiz
+        while (i < len && raw[i] != '[') i++;
+        if (i >= len) return result;
+        i++;
+
+        while (i < len) {
+            // avança até o próximo '{'
+            while (i < len && raw[i] != '{' && raw[i] != ']') i++;
+            if (i >= len || raw[i] == ']') break;
+
+            // extrai o objeto completo com contagem de profundidade
+            int start = i;
+            int depth = 0;
+            boolean inString = false;
+            while (i < len) {
+                byte c = raw[i];
+                if (inString) {
+                    if (c == '\\') i++; // pula char escapado
+                    else if (c == '"') inString = false;
+                } else {
+                    if      (c == '"') inString = true;
+                    else if (c == '{') depth++;
+                    else if (c == '}') { if (--depth == 0) { i++; break; } }
+                }
+                i++;
+            }
+            result.add(Arrays.copyOfRange(raw, start, i));
+        }
+        return result;
     }
 
     private static int envInt(String name, int fallback) {
