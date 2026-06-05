@@ -45,6 +45,16 @@ Nenhuma mudança em código Java além do pool de threads.
 - [x] p99 medido após esta issue documentado em `docs/knowledge/v5/benchmark-opus.md`
   (registro do ganho de infra isolado do GraalVM)
 
+## Notas pós-implementação (2026-06-05)
+
+- **Pool de threads do Jetty — OBSOLETO.** A parte `QueuedThreadPool(8, 2)` foi superada:
+  o Jetty/Javalin saiu do runtime (ver Issue 06, servidor NIO próprio). O `NioHttpServer`
+  é single-thread (reactor), então não há mais pool. HAProxy + cpuset permanecem válidos.
+- **Memória rebalanceada.** Os limites originais eram 165/165/20MB. Sob carga real o
+  HAProxy com `splice` aloca ~31MB de pipes de kernel (250 conexões) e era morto por OOM
+  no limite de 20MB. Rebalanceado para **145/145/60MB** (total 350MB mantido). Ver Issue 04.
+  Pode ser revisitado quando o número de conexões cair (Issue 08).
+
 ## Bloqueada por
 
 Nenhum — pode começar imediatamente.

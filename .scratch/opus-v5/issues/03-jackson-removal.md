@@ -1,6 +1,6 @@
 # Issue 03: Remoção do Jackson em AppConfig
 
-Status: ✓ done
+Status: done
 
 ## Issue pai
 
@@ -38,6 +38,19 @@ para os mesmos arquivos de recursos.
   altera o comportamento em runtime)
 - [x] Nenhuma importação de `com.fasterxml.jackson` fora do escopo de test no
   código principal
+
+## Nota pós-implementação (2026-06-05) — desvio de escopo do Jackson
+
+O `AppConfig` está **100% sem Jackson** (parser por regex) — objetivo central cumprido.
+
+**Porém**, `jackson-core` e `jackson-databind` voltaram para **escopo `compile`** (não `test`),
+porque o `V2ArtifactBuilder` (ferramenta de build-time que lê `references.json.gz` ao gerar
+o `.v2`) usa Jackson. O critério "não lista jackson-databind fora de escopo test" foi
+**relaxado conscientemente**: o Jackson é **inalcançável a partir do entrypoint de runtime**
+(`NioHttpServer`), então o GraalVM Native Image o **elimina como código morto** — não entra
+no binário. O objetivo real (ausência de Jackson no nativo) está cumprido; a letra (escopo
+test) não, por causa do builder. Se um dia o `V2ArtifactBuilder` deixar de usar Jackson,
+dá para movê-lo de volta para `test`.
 
 ## Bloqueada por
 

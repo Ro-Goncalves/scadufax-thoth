@@ -1,6 +1,23 @@
 # Issue 05: PGO loop + benchmark final
 
-Status: ready-for-agent
+Status: ready-for-agent (fazer **depois** da Issue 08 — ver nota de prioridade)
+
+## Nota de prioridade e realidade (2026-06-05)
+
+Reposicionada para **depois da Issue 08**. Motivo: o gargalo atual é o **p99 ~62ms**, que é
+**independente de K/nprobe** (cauda do busy-poll sob CFS), logo **não é custo por request** —
+e o PGO ataca custo por request (p50), não a cauda fixa. Fazer PGO antes de domar o p99
+(Issue 08) sub-otimizaria a medição.
+
+Ajustes desta issue à realidade já implementada:
+- O hot path já está em **MappedByteBuffer** (Issue 07) e sem warmup (Issue 06) — o
+  `default.iprof` deve ser gerado sobre esse hot path final.
+- O servidor é o **NioHttpServer** (não Jetty); o Tracing Agent/PGO devem rodar contra ele.
+- O Dockerfile da Issue 04 já compila via `native-maven-plugin`; o `--pgo` entra nos
+  `buildArgs` do perfil `native` (pom), não numa flag solta.
+- **Critérios de aceite (p99<20ms, score>4800) só são alcançáveis após a Issue 08.** Se a
+  Issue 08 já levar o p99 ao alvo, o PGO vira polimento incremental — reavaliar as metas
+  com os números da 08 em mãos.
 
 ## Issue pai
 
