@@ -22,22 +22,28 @@
     </properties>
 
     <dependencies>
+        <!-- Javalin/Jetty: apenas TESTE. O runtime usa NioHttpServer (reactor NIO
+             próprio). O Jetty entra em busy-spin no GraalVM Native Image; mantê-lo
+             fora do classpath de runtime é o que viabiliza a imagem nativa. -->
         <dependency>
             <groupId>io.javalin</groupId>
             <artifactId>javalin</artifactId>
             <version>${javalin.version}</version>
+            <scope>test</scope>
         </dependency>
+        <!-- Jackson: usado pelo V2ArtifactBuilder em build-time (lê references.json.gz)
+             e pelos testes. NÃO entra na imagem nativa: é inalcançável a partir do
+             entrypoint de runtime (NioHttpServer), então o native-image o elimina.
+             O hot path de runtime parseia bytes direto (FraudRequestParser/AppConfig). -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-core</artifactId>
             <version>${jackson.version}</version>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
             <version>${jackson.version}</version>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
@@ -103,6 +109,10 @@
                                         <exclude>META-INF/*.RSA</exclude>
                                         <exclude>module-info.class</exclude>
                                         <exclude>META-INF/versions/*/module-info.class</exclude>
+                                        <!-- dataset de build (48 MB): só usado pelo V2ArtifactBuilder,
+                                             não pertence ao runtime. example-payloads.json (32 KB)
+                                             PERMANECE: o WarmupService o usa no boot. -->
+                                        <exclude>references.json.gz</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
@@ -112,4 +122,43 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>native</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.graalvm.buildtools</groupId>
+                        <artifactId>native-maven-plugin</artifactId>
+                        <version>0.10.3</version>
+                        <extensions>true</extensions>
+                        <executions>
+                            <execution>
+                                <id>build-native</id>
+                                <goals><goal>compile-no-fork</goal></goals>
+                                <phase>package</phase>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <mainClass>br.com.rgbrainlabs.scadufaxthoth.ScadufaxThothApplication</mainClass>
+                            <imageName>scadufax-thoth</imageName>
+                            <!-- Traz a reachability metadata curada (ex.: threading do
+                                 Jetty). Sem ela o binário nativo sobe sem pool de threads
+                                 e processa requisições em série. -->
+                            <metadataRepository>
+                                <enabled>true</enabled>
+                            </metadataRepository>
+                            <buildArgs>
+                                <buildArg>--enable-native-access=ALL-UNNAMED</buildArg>
+                                <buildArg>--no-fallback</buildArg>
+                                <buildArg>-march=compatibility</buildArg>
+                            </buildArgs>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
 </project>

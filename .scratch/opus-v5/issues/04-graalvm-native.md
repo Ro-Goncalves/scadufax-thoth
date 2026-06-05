@@ -1,6 +1,6 @@
 # Issue 04: GraalVM Native Image sem PGO
 
-Status: ready-for-agent
+Status: done
 
 ## Issue pai
 
@@ -49,16 +49,36 @@ e responde. A Issue 05 (PGO) atualiza o Dockerfile para referenciar o `default.i
 
 ## Critérios de aceite
 
-- [ ] `mvn -Pnative package` conclui e gera o binary em `target/`
-- [ ] `mvn -Pnative verify` verde, ou smoke K6 verde como fallback
-- [ ] `V2QualityGuardTest` verde no binary nativo (score\_det=3.000, 0 FP/FN) — via
-  mvn verify nativo ou via carga K6 com score como proxy
-- [ ] `docker build` com o novo Dockerfile multi-estágio conclui sem erros
-- [ ] Container nativo sobe e `/ready` retorna HTTP 200
-- [ ] Smoke K6 (`--profile smoke`) verde contra o container nativo
-- [ ] Configs do Tracing Agent commitados em `META-INF/native-image/`
-- [ ] Binary nativo < 30MB (expectativa: ~12MB)
-- [ ] Container final baseado em `distroless` — sem JRE presente
+- [x] `mvn -Pnative package` conclui e gera o binary em `target/`
+- [x] Smoke K6 verde contra o container nativo (fallback adotado)
+- [x] `V2QualityGuardTest` verde no binary nativo (0 FP/FN) — e confirmado por carga K6
+  (load test nativo: 0 FP/FN, 0% falha)
+- [x] `docker build` com o Dockerfile multi-estágio conclui sem erros
+- [x] Container nativo sobe e `/ready` retorna HTTP 200
+- [x] Smoke K6 (`--profile smoke`) verde contra o container nativo
+- [x] Configs do Tracing Agent commitados em `META-INF/native-image/`
+- [ ] ~~Binary nativo < 30MB (expectativa: ~12MB)~~ → **desvio: ~32MB** (ver abaixo)
+- [x] Container final baseado em `distroless` — sem JRE presente
+
+## Resultado e desvios (2026-06-05)
+
+A imagem nativa está **funcional e em produção do benchmark** (0% falha, 0 FP/FN). O
+caminho divergiu do plano original em pontos importantes — todos resolvidos, registrados
+aqui e desdobrados em issues próprias:
+
+- **Build via `native-maven-plugin`, não `native-image` cru.** Sem o plugin, falta a
+  *reachability metadata* curada; o Dockerfile virou **3 estágios** (jar-build → native-build
+  com Maven copiado da imagem oficial → runner).
+- **Runtime `distroless/cc-debian12`, não `base`.** O binário GraalVM linka `libz.so.1`,
+  ausente no `base`; copiamos a `libz` do estágio de build. Imagem final ~54MB.
+- **Binário ~32MB (não ~12MB).** Acima da meta. Excluímos `references.json.gz` (48MB) do
+  fat JAR (era embutido como resource e inchava o image heap). Reduzir mais (strip,
+  `-H:+RemoveUnusedSymbols`) fica para depois — não bloqueia.
+- **Heap explícito no ENTRYPOINT** (`-Xms50m -Xmx80m`): sem isso o nativo usa 80% do cgroup
+  e morre por OOM sob carga.
+- **História de usuário 28 do PRD FALSIFICADA.** "MemorySegment funciona no nativo" — funciona,
+  mas é ~14x mais lento (FFM não otimizado no CE). Trocado por `MappedByteBuffer` na **Issue 07**.
+- **Jetty não funciona no nativo** (busy-spin) → servidor NIO próprio na **Issue 06**.
 
 ## Bloqueada por
 

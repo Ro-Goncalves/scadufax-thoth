@@ -1,0 +1,14 @@
+{
+  "resources": {
+    "includes": [
+      {"pattern": "normalization\\.json"},
+      {"pattern": "mcc_risk\\.json"},
+      {"pattern": "example-payloads\\.json"},
+      {"pattern": ".*\\.properties"}
+    ]
+  },
+  "bundles": [
+    {"name": "jakarta.servlet.LocalStrings"},
+    {"name": "jakarta.servlet.http.LocalStrings"}
+  ]
+}
