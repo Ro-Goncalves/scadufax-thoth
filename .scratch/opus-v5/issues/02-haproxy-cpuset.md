@@ -1,10 +1,10 @@
 # Issue 02: HAProxy splice + cpuset + pool de threads
 
-Status: ready-for-agent
+Status: done
 
 ## Issue pai
 
-[PRD: Tesseract V5 — Opus](../PRD.md) — histórias de usuário 11–20.
+[PRD: V5 — Opus](../PRD.md) — histórias de usuário 11–20.
 
 ## O que construir
 
@@ -35,14 +35,14 @@ Nenhuma mudança em código Java além do pool de threads.
 
 ## Critérios de aceite
 
-- [ ] `mvn -q compile` passa sem erros
-- [ ] `docker compose up` sobe a stack (HAProxy + api1 + api2) sem erros
-- [ ] Smoke K6 (`--profile smoke`) conclui verde: HTTP 200 em `/fraud-score` e `/ready`
-- [ ] Carga K6 (`--profile test`) conclui e gera `test/results.json` com
+- [x] `mvn -q compile` passa sem erros
+- [x] `docker compose up` sobe a stack (HAProxy + api1 + api2) sem erros
+- [x] Smoke K6 (`--profile smoke`) conclui verde: HTTP 200 em `/fraud-score` e `/ready`
+- [x] Carga K6 (`--profile test`) conclui e gera `test/results.json` com
   `score_det` ≥ 3.000 (sem regressão de detecção)
-- [ ] `haproxy.cfg` versionado no repositório
-- [ ] `nginx.conf` removido do repositório
-- [ ] p99 medido após esta issue documentado em `docs/knowledge/v5/benchmark-opus.md`
+- [x] `haproxy.cfg` versionado no repositório
+- [x] `nginx.conf` removido do repositório
+- [x] p99 medido após esta issue documentado em `docs/knowledge/v5/benchmark-opus.md`
   (registro do ganho de infra isolado do GraalVM)
 
 ## Bloqueada por
