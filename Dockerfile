@@ -13,10 +13,10 @@ ADD https://github.com/zanfranceschi/rinha-de-backend-2026/raw/main/resources/re
     /build/src/main/resources/references.json.gz
 
 # Parâmetros de build do K-means e dtype (variáveis para experimentos sem recompilar)
-ARG NUM_CLUSTERS=1024
+ARG NUM_CLUSTERS=2048
 ARG KMEANS_ITERATIONS=20
 ARG KMEANS_SEED=42
-ARG DTYPE=i8
+ARG DTYPE=i16
 
 # Gera o artefato binário V2 com múltiplos clusters via K-means.
 RUN java -Xmx512m -cp target/scadufax-thoth.jar \
