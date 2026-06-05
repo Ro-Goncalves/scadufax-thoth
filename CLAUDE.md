@@ -5,7 +5,6 @@ Estas instruções orientam agentes que trabalham neste repositório. Mantenha m
 ## Workflow
 
 - Leia primeiro: README.md, docs/knowledge/scadufax-thoth.md e docs/rinha/.
-- Ao tocar a stack HTTP ou o bootstrap da aplicação, leia também docs/javalin/README.md e src/main/java/br/com/rgbrainlabs/scadufaxthoth/.
 - Build rápido: mvn -q compile.
 - Antes de editar, localize a área dona da mudança e prefira validação focada.
 
@@ -38,7 +37,6 @@ Estas instruções orientam agentes que trabalham neste repositório. Mantenha m
 - Preserve comentários que carreguem intenção, contexto ou proveniência.
 - Ao adicionar comentário, explique o porquê e não o óbvio.
 - Centralize decisões arquiteturais e trade-offs em docs/knowledge/scadufax-thoth.md.
-- Curadoria de documentação externa deve ficar em docs/javalin/ e docs/jackson/.
 - Em texto corrido em português, use acentuação correta sem alterar identificadores ou literais técnicos.
 
 ## Tests
@@ -54,7 +52,7 @@ Estas instruções orientam agentes que trabalham neste repositório. Mantenha m
 - Recursos e tabelas de apoio: resources/.
 - Scripts e utilitários: generate-data.sh, estimated-requests.sh, run.sh e data-generator/.
 - Harness local e carga: test/.
-- Documentação principal: README.md, docs/knowledge/scadufax-thoth.md, docs/rinha/, docs/javalin/ e docs/jackson/.
+- Documentação principal: README.md, docs/knowledge/scadufax-thoth.md e docs/rinha/.
 
 ## Sharp Edges
 
