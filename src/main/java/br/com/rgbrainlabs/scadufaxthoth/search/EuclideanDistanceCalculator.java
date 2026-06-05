@@ -1,46 +1,55 @@
 package br.com.rgbrainlabs.scadufaxthoth.search;
 
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
-import java.nio.ByteOrder;
+import java.nio.ByteBuffer;
 
+/**
+ * Kernel de distância euclidiana ao quadrado sobre um {@link ByteBuffer} mapeado.
+ *
+ * <p>Lê via {@code ByteBuffer} absoluto (não {@code MemorySegment}): no GraalVM Native
+ * Image os loops sobre ByteBuffer são auto-vetorizados (AVX2), enquanto o acesso FFM
+ * via {@code MemorySegment.get(layout, off)} não é otimizado — fonte do gargalo de ~10ms
+ * por busca no nativo. Os acessos absolutos ({@code get(int)}) não mutam a posição do
+ * buffer, então são seguros no reactor single-thread.
+ */
 public class EuclideanDistanceCalculator implements DistanceCalculator {
 
-    private static final ValueLayout.OfFloat JAVA_FLOAT_BE_UNALIGNED = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.BIG_ENDIAN);
-    private static final ValueLayout.OfShort JAVA_SHORT_LE_UNALIGNED = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
-
     @Override
-    public double calculate(float[] queryVector, MemorySegment segment, long offset, int dimensions) {
+    public double calculate(float[] queryVector, ByteBuffer buffer, long offset, int dimensions) {
+        // Path float32 (usado por testes). Lê BIG_ENDIAN explicitamente, sem depender da
+        // ordem do buffer — não é hot path.
         double squaredDistance = 0.0;
-        long currentOffset = offset; // Usamos uma variável local para não alterar o offset do buscador
-
+        int p = (int) offset;
         for (int i = 0; i < dimensions; i++) {
-            float vectorVal = segment.get(JAVA_FLOAT_BE_UNALIGNED, currentOffset);
+            int bits = ((buffer.get(p)     & 0xFF) << 24)
+                     | ((buffer.get(p + 1) & 0xFF) << 16)
+                     | ((buffer.get(p + 2) & 0xFF) << 8)
+                     |  (buffer.get(p + 3) & 0xFF);
+            float vectorVal = Float.intBitsToFloat(bits);
             float diff = queryVector[i] - vectorVal;
             squaredDistance += (diff * diff);
-            currentOffset += 4; // Avança 4 bytes (tamanho de um float)
+            p += 4;
         }
-
         return squaredDistance;
     }
 
     @Override
-    public double calculateI8(byte[] query, MemorySegment segment, long base, int dims) {
-        // Opera no espaço inteiro: evita conversão para float no hot loop
+    public double calculateI8(byte[] query, ByteBuffer buffer, long base, int dims) {
+        int b = (int) base;
         int dist = 0;
         for (int d = 0; d < dims; d++) {
-            int diff = query[d] - segment.get(ValueLayout.JAVA_BYTE, base + d);
+            int diff = query[d] - buffer.get(b + d);
             dist += diff * diff;
         }
         return dist;
     }
 
     @Override
-    public double calculateI16(short[] query, MemorySegment segment, long base, int dims) {
-        // Máx 14 × 20 000² = 5,6 × 10⁹ — ultrapassa int, opera em long
+    public double calculateI16(short[] query, ByteBuffer buffer, long base, int dims) {
+        // Buffer em LITTLE_ENDIAN (índice V2). Máx 14 × 20 000² = 5,6×10⁹ — acumula em long.
+        int b = (int) base;
         long dist = 0;
         for (int d = 0; d < dims; d++) {
-            int diff = query[d] - segment.get(JAVA_SHORT_LE_UNALIGNED, base + d * 2L);
+            int diff = query[d] - buffer.getShort(b + d * 2);
             dist += (long) diff * diff;
         }
         return dist;

@@ -3,9 +3,8 @@ package br.com.rgbrainlabs.scadufaxthoth.search;
 import br.com.rgbrainlabs.scadufaxthoth.domain.SearchResult;
 
 import java.io.*;
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
+import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -57,8 +56,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     private final long[] offsets; // offsets relativos ao dataOffset
     private final int[][] bboxMin; // limite inferior por dimensão (espaço do dtype) — poda V4-A
     private final int[][] bboxMax; // limite superior por dimensão (espaço do dtype) — poda V4-A
-    private final Arena arena;
-    private final MemorySegment file;
+    private final MappedByteBuffer file; // índice mmap; LITTLE_ENDIAN (encoding V2)
     private final DistanceCalculator calculator;
     private final ThreadLocal<SearchState> searchState;
 
@@ -71,7 +69,6 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
             throws IOException {
         this.calculator = calculator;
         this.nprobe = nprobe;
-        this.arena = Arena.ofShared();
 
         Header header = readHeader(artifactPath);
         this.numClusters = header.numClusters;
@@ -89,7 +86,9 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         this.searchState = ThreadLocal.withInitial(() -> new SearchState(nc));
 
         try (FileChannel ch = FileChannel.open(artifactPath, StandardOpenOption.READ)) {
-            this.file = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size(), arena);
+            MappedByteBuffer m = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+            m.order(ByteOrder.LITTLE_ENDIAN); // shorts i16 do artefato são little-endian
+            this.file = m; // o mapeamento sobrevive ao fechamento do channel
         }
     }
 
@@ -145,7 +144,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         for (int i = 0; i < blockCount; i++) {
             long recordBase = blockStart + (long) i * recordSize;
             double dist = calculator.calculateI16(q16, file, recordBase + 1, DIMS);
-            byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+            byte labelByte = file.get((int) recordBase);
             selector.tryInsert(dist, labelByte);
         }
     }
@@ -157,7 +156,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         for (int i = 0; i < blockCount; i++) {
             long recordBase = blockStart + (long) i * recordSize;
             double dist = calculator.calculateI8(q8, file, recordBase + 1, DIMS);
-            byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+            byte labelByte = file.get((int) recordBase);
             selector.tryInsert(dist, labelByte);
         }
     }
@@ -193,7 +192,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
     @Override
     public void close() {
-        arena.close();
+        // MappedByteBuffer não tem unmap explícito (liberado pelo Cleaner na coleta).
+        // Mantido para satisfazer AutoCloseable e o try-with-resources dos testes.
     }
 
     /** Bounding box inferior por cluster (espaço do dtype). Pacote-privado para teste/poda V4-A. */
@@ -223,15 +223,18 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
      */
     public long prewarm() {
         long t0 = System.currentTimeMillis();
-        long size = file.byteSize();
+        // MADV_WILLNEED + force-load: lê o mapeamento para a RAM e sinaliza ao page
+        // cache para mantê-lo residente, matando page faults frios no primeiro request.
+        file.load();
+        int size = file.capacity();
         long sink = 0;
         long accesses = 0;
-        for (long off = 0; off < size; off += 4096) {
-            sink += file.get(ValueLayout.JAVA_BYTE, off);
+        for (int off = 0; off < size; off += 4096) {
+            sink += file.get(off);
             accesses++;
         }
         if (size > 0 && (size % 4096) != 0) {
-            sink += file.get(ValueLayout.JAVA_BYTE, size - 1);
+            sink += file.get(size - 1);
         }
         PREWARM_SINK = sink;
         System.out.printf("[prewarm] %d páginas tocadas em %d ms%n",
