@@ -131,4 +131,40 @@ class TopKSelectorTest {
         assertEquals("fraud", results.get(0).label());
         assertEquals("legitimate", results.get(1).label());
     }
+
+    @Test
+    void worstDist_retornaTopDistKMenos1EEvoluiComCandidatosMelhores() {
+        int k = 3;
+        TopKSelector selector = new TopKSelector(k);
+
+        // Sem candidatos: o slot k-1 ainda é o sentinela de inicialização.
+        assertEquals(Double.MAX_VALUE, selector.worstDist(),
+                "Sem candidatos, worstDist deve ser Double.MAX_VALUE");
+
+        // Menos de k candidatos: o slot k-1 segue vazio (sentinela) — nada é podável.
+        selector.tryInsert(10.0, (byte) 0);
+        selector.tryInsert(5.0, (byte) 0);
+        assertEquals(Double.MAX_VALUE, selector.worstDist(),
+                "Com menos de k candidatos, worstDist segue Double.MAX_VALUE");
+
+        // Exatamente k: worstDist passa a ser o k-ésimo (maior das distâncias).
+        selector.tryInsert(8.0, (byte) 0);
+        assertEquals(10.0, selector.worstDist(),
+                "Com k candidatos, worstDist == topDist[k-1] (a maior distância)");
+
+        // Candidato melhor expulsa o pior: worstDist decresce.
+        selector.tryInsert(6.0, (byte) 1);
+        assertEquals(8.0, selector.worstDist(),
+                "Após candidato melhor, worstDist cai para o novo k-ésimo");
+
+        // Outro ainda melhor: decresce monotonicamente.
+        selector.tryInsert(1.0, (byte) 1);
+        assertEquals(6.0, selector.worstDist(),
+                "worstDist evolui monotonicamente decrescente");
+
+        // Candidato pior que o k-ésimo atual não altera worstDist.
+        selector.tryInsert(99.0, (byte) 0);
+        assertEquals(6.0, selector.worstDist(),
+                "Candidato pior que o k-ésimo não muda worstDist");
+    }
 }

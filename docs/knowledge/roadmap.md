@@ -137,15 +137,15 @@ e a nota sobre `nearestFraudCount` em [`v3/01-celeritas.md`](v3/01-celeritas.md)
 
 ---
 
-## V4: Veritas — Busca exata (correção de detecção)
+## V4: Veritas — Busca exata (correção de detecção) — ✅ ENTREGUE
 
-> **Reescopo pós-V3.** A V3 saturou o `score_p99` (configs em 13–24ms) e o
-> `final_score` passou a ser decidido pelo `score_det`, preso em ~1.335 pelo limite
-> estrutural do IVF aproximado. A única alavanca de score que sobra é **detecção**.
-> A V4 foca nisso: busca exata + aperto da cauda de p99. Itens de latência pura
-> (servidor NIO) saíram para perto da V6, onde latência volta a pagar.
+> **Resultado:** migração i8→i16 (−91% erros de quantização) + bounding-box pruning
+> (busca provadamente exata) + parser JSON custom (zero-alocação na entrada).
+> `score_det` atingiu o teto do sistema (**3.000**, 0 FP/FN). `final_score` ~4.394
+> em 2 rodadas de validação; medição rigorosa de 5 boots pendente (Issue 07).
+> p99 mediano ~40ms — cauda de GC, não custo de busca.
 
-Tema **Veritas** — a verdade da detecção. Sequência: diagnóstico → V4-A → (gate) → V4-C.
+Tema **Veritas** — a verdade da detecção. Itens abaixo documentados para referência histórica.
 
 ### V4-0: Diagnóstico de percentis (abre a V4) — barato
 
@@ -234,6 +234,36 @@ Técnica chave: ISO-8601 → epoch seconds sem `Instant`/`ZonedDateTime`, usando
 algoritmo de Howard Hinnant (daysFromCivil). O caller passa `float[]` pré-alocado;
 o parser escreve in-place — zero `new` no hot path.
 
+**✅ ENTREGUE (com regressão corrigida).** `FraudRequestParser` implementado;
+`JavalinJackson` removido como mapper HTTP; 56/56 testes verdes. **Porém o `ThreadLocal`
+de zero-alocação colidiu com `useVirtualThreads = true` e degradou o benchmark**
+(p99 40 ms → 1116 ms; `final_score` +4394 → −1329). Correção: desligar virtual threads e
+usar pool pequeno de platform threads (o `ThreadLocal` volta a reaproveitar). Autópsia
+completa em `docs/knowledge/v4/07-postmortem-parser-virtual-threads.md`. Detalhes de
+parsing em `docs/knowledge/v4/06-parser-json-custom.md`.
+
+**Por que o parser produz `float[14]` e não `int16` diretamente:**
+`float32` é o espaço lógico do domínio — valores normalizados em `[0, 1]` com sentinela
+`-1.0f`. A quantização para int8/int16 é responsabilidade do `V2IndexSearcher.quantizeQuery()`,
+que conhece o `dtype` e o `scale` do artefato. O parser não deve conhecer detalhes de
+armazenamento. Parsear em int16 economizaria ~50–100 ns de aritmética por requisição —
+negligenciável frente ao p99 de ~40 ms.
+
+**Alocações residuais no `V2IndexSearcher.search()` (próxima micro-otimização):**
+Após o parser, o caminho quente ainda aloca por requisição:
+- `quantizeQuery()` → `new int[14]`
+- `toI16Query()` → `new short[14]`
+- `rankClusters()` → `new long[K]` + `new int[K]` (~16 KB para K=1024)
+
+Padrão de correção: `ThreadLocal<SearchState>` em `V2IndexSearcher`, exatamente como o
+`ParseState` no parser. Candidato à Issue 08 ou parte da Issue 07 (benchmark rigoroso).
+
+> ⚠️ **Pré-condição:** este `ThreadLocal<SearchState>` só é seguro **depois** de desligar
+> as virtual threads (Opção 1, ver `v4/07-postmortem-parser-virtual-threads.md`). Sob
+> virtual-thread-por-requisição ele reproduziria a mesma regressão do `ParseState`. Com
+> pool fixo de platform threads o padrão reaproveita e fica correto — mas a ordem importa:
+> corrigir o modelo de threads primeiro.
+
 ### V4-D: Insertion sort para K=5 — ✅ JÁ ENTREGUE NA V3-D
 
 > Antecipado para a V3 e entregue (commit do V3-D). Detalhes em
@@ -267,19 +297,63 @@ Processo:
 2. Executar K6 smoke para gerar o perfil
 3. Recompilar com o perfil: `native-image --pgo=default.iprof`
 
-**Caminho de implementação:**
+### V5-0: ThreadLocal\<SearchState\> no V2IndexSearcher
+
+O hot path ainda aloca por requisição mesmo após o parser V4-C:
+- `quantizeQuery()` → `new int[14]`
+- `toI16Query()` → `new short[14]`
+- `rankClusters()` → `new long[K]` + `new int[K]` (~16 KB para K=1024)
+
+Padrão idêntico ao `ParseState` do parser: `ThreadLocal<SearchState>` no
+`V2IndexSearcher`. Com o pool fixo de platform threads, o ThreadLocal
+reutiliza de verdade — zero `new` no hot path de busca. Reduz GC pressure antes
+do build native, onde não há JIT para compensar alocações extras.
+
+> ⚠️ **Pré-condição:** virtual threads desligadas. Com VTs o padrão
+> reproduziria a regressão do `ParseState`. Confirmar Issue 07 antes de implementar.
+
+**Caminho de implementação do GraalVM:**
 1. Adicionar `native-maven-plugin` ao `pom.xml`
-2. Rodar Tracing Agent com K6 smoke (captura reflection/resources de Javalin+Jackson)
+2. Rodar Tracing Agent com K6 smoke (captura reflection/resources de Javalin)
 3. Gerar `reflect-config.json`, `resource-config.json` em `META-INF/native-image`
 4. Novo Dockerfile: build com `ghcr.io/graalvm/native-image-community:25`, runner `distroless`
 5. Adicionar loop de PGO (instrumento → smoke → recompila)
 6. Validar `V2QualityGuardTest` e smoke K6
 
-**Nota:** V4-C (parser custom) e V4-E (servidor custom) simplificam muito o GraalVM
-porque eliminam Jackson e Javalin — principais fontes de reflection.
+**Nota:** V4-C eliminou Jackson — principal fonte de reflection. Javalin ainda está
+presente; o Tracing Agent captura o que resta.
 
 **Referências:**
 - arthurd3: binário final de 12MB, score 5.731 partindo de ~4.393 sem Rust
+
+### V5-1: HAProxy L4 (TCP mode)
+
+Trocar o Nginx pelo HAProxy operando em modo TCP puro (L4). O Nginx em configuração
+padrão opera em L7: reconstrói o HTTP inteiro, faz parse dos cabeçalhos e abre uma
+nova conexão para o backend — trabalho que consome ~0.3 vCPU do orçamento global de
+1.5 vCPU da stack. O HAProxy em modo TCP é um "cano burro": recebe pacotes na porta
+9999 e distribui por round-robin sem tocar no payload.
+
+**Custo:** apenas config — `docker-compose.yml` + `haproxy.cfg`. Sem mudança em Java.
+
+```haproxy
+# haproxy.cfg
+frontend rinha
+    bind *:9999
+    mode tcp
+    default_backend apis
+
+backend apis
+    mode tcp
+    balance roundrobin
+    server api1 api1:8080 check
+    server api2 api2:8080 check
+```
+
+**Limitação:** HAProxy L4 ainda aceita e entrega cada conexão TCP — ocupa um fd e
+ciclos de CPU por conexão. O salto para fd-passing (V6) elimina esse overhead por
+completo: o LB transfere o fd do cliente para a API via `SCM_RIGHTS` e sai do caminho.
+O V5-1 é um degrau intermediário; o ganho definitivo de infra está na V6.
 
 ---
 
@@ -370,21 +444,23 @@ V2 finalizada (K=1024, nprobe=4)
          │   └── V3-C  nginx stream + Unix sockets  ← ❌ removido/adiado
          │   (resultado: score_p99 saturou; detecção é a folga que sobra)
          │
-         └── V4 Veritas (verdade) — busca exata ⭐ ← PRIORIDADE MÁXIMA
-                   (0 FP/FN → score_det ~2.000+ → final ~3.600+)
+         └── V4 Veritas (verdade) — busca exata ⭐ ✅ ENTREGUE
+                   (0 FP/FN, score_det=3000 teto, final_score~4394)
                     │
-                    ├── V4-0  diagnóstico de percentis (p50/p95)  ← decide se C entra
-                    ├── V4-A  bounding-box pruning (+ invest. int8/int16) ⭐
+                    ├── V4-0  diagnóstico de percentis (p50/p95)  ← ✅ entregue
+                    ├── V4-A  bounding-box pruning (+ migração i16) ⭐ ← ✅ entregue
                     ├── V4-B  IVF repair          ← ❌ cortado (subsumido por A)
-                    ├── V4-C  custom JSON parser  ← condicionado ao V4-0
+                    ├── V4-C  custom JSON parser  ← ✅ entregue (regressão VT corrigida)
                     ├── V4-D  insertion sort K=5  ← ✅ entregue na V3-D
                     ├── V4-E  custom HTTP server NIO ← ➡️ movido para a V6
                     │
-                    ├── [GATE: medir score — replanejar V5/V6 com o número novo]
+                    ├── [GATE ✅ CRUZADO — final_score ~4394, score_det=3000 (teto)]
                     │
-                    ├── V5 Opus (obra-prima)
+                    ├── V5 Opus (obra-prima) ← PRÓXIMO
+                    │      V5-0  ThreadLocal<SearchState> ← elimina últimas alocações
+                    │      V5-1  HAProxy L4 (TCP mode)    ← troca de config, libera ~0.3 vCPU
                     │      GraalVM Native Image + PGO
-                    │      (simplificado após V4-C eliminar Jackson)
+                    │      (V4-C eliminou Jackson; Javalin coberto pelo Tracing Agent)
                     │
                     ├── V6 Pontifex (pontes)
                     │      servidor NIO custom (ex-V4-E) + fd-passing LB (C/Rust)
@@ -394,9 +470,7 @@ V2 finalizada (K=1024, nprobe=4)
                            Knowledge distillation ← longo prazo
 ```
 
-**Gate de decisão principal — após V4-A:**
-Se bbox pruning levar `score_det` de ~1.335 para ~2.000+, o `final_score` cruza
-3.600 e entra em território de top-10 Java. Latência não é mais o gargalo (a V3
-saturou o `score_p99`), então a partir daí V5 (GraalVM, zero JIT warmup) e V6
-(servidor NIO + fd-passing, -80% p99) são os alavancadores para perseguir o top-5 —
-replanejados com o score pós-V4-A na mão.
+**Gate de decisão principal — ✅ CRUZADO:**
+A V4 levou `score_det` de ~1.335 para **3.000** (teto do sistema), com `final_score`
+~4.394 — território top-10 Java. A V5 (GraalVM + PGO) e a V6 (servidor NIO +
+fd-passing, -80% p99) são os próximos alavancadores para perseguir o top-5.

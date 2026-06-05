@@ -61,6 +61,19 @@ public final class TopKSelector {
     }
 
     /**
+     * Pior distância no top-k atual: o k-ésimo elemento (topDist[k-1]).
+     *
+     * Enquanto há menos de k candidatos, retorna Double.MAX_VALUE (valor de
+     * inicialização dos slots ainda não preenchidos). Isso é proposital para o
+     * bbox pruning: um lower-bound nunca é maior que MAX_VALUE, então nenhum
+     * cluster é podado antes do top-k encher — só depois disso a poda começa a
+     * valer.
+     */
+    public double worstDist() {
+        return topDist[k - 1];
+    }
+
+    /**
      * Materializa os resultados coletados como List<SearchResult> em ordem
      * crescente de distância. Chamado uma única vez ao final da varredura.
      */

@@ -12,16 +12,17 @@ RUN mvn -q -B -DskipTests package
 ADD https://github.com/zanfranceschi/rinha-de-backend-2026/raw/main/resources/references.json.gz \
     /build/src/main/resources/references.json.gz
 
-# Parâmetros de build do K-means (variáveis para experimentos sem recompilar)
-ARG NUM_CLUSTERS=1024
+# Parâmetros de build do K-means e dtype (variáveis para experimentos sem recompilar)
+ARG NUM_CLUSTERS=2048
 ARG KMEANS_ITERATIONS=20
 ARG KMEANS_SEED=42
+ARG DTYPE=i16
 
 # Gera o artefato binário V2 com múltiplos clusters via K-means.
 RUN java -Xmx512m -cp target/scadufax-thoth.jar \
     br.com.rgbrainlabs.scadufaxthoth.prep.V2ArtifactBuilder \
     src/main/resources/references.json.gz /build/data/index.v2 \
-    ${NUM_CLUSTERS} ${KMEANS_ITERATIONS} ${KMEANS_SEED}
+    ${NUM_CLUSTERS} ${KMEANS_ITERATIONS} ${KMEANS_SEED} ${DTYPE}
 
 # Estágio 2: Runtime
 FROM eclipse-temurin:25-jre-jammy

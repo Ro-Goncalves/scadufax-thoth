@@ -4,7 +4,7 @@ services:
     environment:
       - PORT=8080
       - DATA_DIR=/data
-      - NPROBE=${NPROBE:-4}
+      - NPROBE=${NPROBE:-6}
       - K_NEIGHBORS=${K_NEIGHBORS:-5}
       - FRAUD_THRESHOLD=${FRAUD_THRESHOLD:-0.6}
     deploy:
@@ -18,7 +18,7 @@ services:
     environment:
       - PORT=8080
       - DATA_DIR=/data
-      - NPROBE=${NPROBE:-4}
+      - NPROBE=${NPROBE:-6}
       - K_NEIGHBORS=${K_NEIGHBORS:-5}
       - FRAUD_THRESHOLD=${FRAUD_THRESHOLD:-0.6}
     deploy:

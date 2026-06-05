@@ -4,8 +4,9 @@ import br.com.rgbrainlabs.scadufaxthoth.domain.SearchResult;
 import br.com.rgbrainlabs.scadufaxthoth.prep.V2ArtifactBuilder;
 import br.com.rgbrainlabs.scadufaxthoth.search.EuclideanDistanceCalculator;
 import br.com.rgbrainlabs.scadufaxthoth.search.V2IndexSearcher;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -13,24 +14,31 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.zip.GZIPOutputStream;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+
 /**
- * Guarda de qualidade da V2: compara IVF contra referência exata e falha
- * quando a divergência de decisão ultrapassa os limites definidos.
+ * Guarda de qualidade da V2, estendida na V4-A (bbox pruning) para exigir exatidão.
  *
  * Três caminhos comparados por query:
  *   1. Float32 brute-force (ground truth)
  *   2. V2 full-scan  nprobe=NUM_CLUSTERS  → isola perda de quantização
- *   3. V2 IVF        nprobe=TEST_NPROBE   → isola perda de particionamento
+ *   3. V2 IVF        nprobe=TEST_NPROBE   → com a poda, vira busca exata
+ *
+ * Antes da V4-A o caminho 3 (nprobe baixo) era aproximado e tolerava um acordo mínimo.
+ * Com o bbox pruning o IVF itera todos os clusters, podando por lower-bound geométrico,
+ * e passa a devolver EXATAMENTE os mesmos vizinhos do full-scan (caminho 2). O teste
+ * agora prova isso: por query, a lista de vizinhos do IVF é idêntica à do full-scan
+ * (distância e label, em ordem) e a divergência de particionamento é zero.
  *
  * Fixture: 60 vetores em 3 grupos separados na dimensão 0:
  *   Grupo A (20 legítimos) : dim0 em [0.00, 0.19]
  *   Grupo B (10 leg+10 fra): dim0 em [0.40, 0.59]
  *   Grupo C (20 fraudes)   : dim0 em [0.80, 0.99]
  *
- * Com K=6 clusters, nprobe=2 visita 1/3 dos clusters — stress test deliberado.
- * Com nprobe=6 (full scan) o resultado é equivalente ao brute-force int8.
+ * Com K=6 clusters, nprobe=2 visitaria 1/3 dos clusters; a poda recupera o restante
+ * sem varrer tudo, mantendo o resultado idêntico ao full-scan (nprobe=6).
  */
 class V2QualityGuardTest {
 
@@ -42,16 +50,14 @@ class V2QualityGuardTest {
     /** Acordo de decisão mínimo entre full-scan (int8) e float32 BF. */
     private static final double MIN_AGREEMENT_QUANTIZATION = 0.95;
 
-    /** Acordo de decisão mínimo entre IVF (nprobe=TEST_NPROBE) e float32 BF. */
-    private static final double MIN_AGREEMENT_IVF          = 0.80;
-
-    @Test
-    void guardaQualidade_preservaDecisoesDeFragude(@TempDir Path tmpDir) throws Exception {
+    @ParameterizedTest
+    @EnumSource(V2ArtifactBuilder.Dtype.class)
+    void guardaQualidade_preservaDecisoesDeFragude(V2ArtifactBuilder.Dtype dtype, @TempDir Path tmpDir) throws Exception {
         List<FixtureRecord> records = buildFixtureRecords();
         Path gz       = tmpDir.resolve("fixture.json.gz");
         Path artifact = tmpDir.resolve("index.v2");
         writeGz(gz, toJson(records));
-        V2ArtifactBuilder.build(gz, artifact, NUM_CLUSTERS, 10, 0L);
+        V2ArtifactBuilder.build(gz, artifact, NUM_CLUSTERS, 10, 0L, dtype);
 
         List<float[]> queries = buildQueries();
         int n = queries.size();
@@ -67,9 +73,20 @@ class V2QualityGuardTest {
                      artifact, new EuclideanDistanceCalculator(), TEST_NPROBE)) {
 
             for (float[] q : queries) {
-                boolean truthDecision    = bruteForceDecision(records, q);
-                boolean fullScanDecision = decision(fullScan.search(q, K_NEIGHBORS));
-                boolean ivfDecision      = decision(ivf.search(q, K_NEIGHBORS));
+                boolean truthDecision = bruteForceDecision(records, q);
+
+                List<SearchResult> fullScanResults = fullScan.search(q, K_NEIGHBORS);
+                List<SearchResult> ivfResults      = ivf.search(q, K_NEIGHBORS);
+
+                // Prova de exatidão do pruning: a busca podada (nprobe baixo) devolve
+                // EXATAMENTE os mesmos vizinhos do full-scan (mesmo dtype) — distância e
+                // label, em ordem. Se a poda errasse, esta igualdade quebraria.
+                assertEquals(fullScanResults, ivfResults,
+                        "Bbox pruning divergiu do full-scan na query dim0=" + q[0]
+                      + " — busca deixou de ser exata");
+
+                boolean fullScanDecision = decision(fullScanResults);
+                boolean ivfDecision      = decision(ivfResults);
 
                 if (truthDecision == fullScanDecision) {
                     agreementQuantization++;
@@ -96,8 +113,8 @@ class V2QualityGuardTest {
         System.out.printf("Clusters / nprobe    : %d / %d%n", NUM_CLUSTERS, TEST_NPROBE);
         System.out.printf("Acordo quantização   : %.1f%%  (full-scan vs float32, mín %.0f%%)%n",
                 rateQ * 100, MIN_AGREEMENT_QUANTIZATION * 100);
-        System.out.printf("Acordo IVF           : %.1f%%  (nprobe=%d vs float32, mín %.0f%%)%n",
-                rateIvf * 100, TEST_NPROBE, MIN_AGREEMENT_IVF * 100);
+        System.out.printf("Acordo IVF           : %.1f%%  (nprobe=%d vs float32, esperado == quantização)%n",
+                rateIvf * 100, TEST_NPROBE);
         System.out.printf("Divergências         : quantização=%d  particionamento=%d%n",
                 divQuantization, divPartitioning);
 
@@ -107,11 +124,17 @@ class V2QualityGuardTest {
                       + "verificar encodeI8 e domínio do vetor",
                         rateQ * 100, MIN_AGREEMENT_QUANTIZATION * 100));
 
-        assertTrue(rateIvf >= MIN_AGREEMENT_IVF,
-                String.format(
-                        "IVF degradou demais: %.1f%% < %.0f%% mínimo (nprobe=%d, K=%d) — "
-                      + "aumentar nprobe ou revisar K",
-                        rateIvf * 100, MIN_AGREEMENT_IVF * 100, TEST_NPROBE, NUM_CLUSTERS));
+        // V4-A: com bbox pruning a busca é exata. Toda divergência de particionamento
+        // (full-scan acerta, IVF erra) deve desaparecer — não há mais "acordo mínimo".
+        assertEquals(0, divPartitioning,
+                "Bbox pruning deve zerar a divergência de particionamento: o IVF (nprobe="
+              + TEST_NPROBE + ") tem de igualar o full-scan. Restaram " + divPartitioning);
+
+        // Nesta fixture a quantização não perde nenhuma decisão contra o float32 BF
+        // (acordo de 100%). Como o IVF == full-scan, isso fecha o acordo IVF↔float32.
+        assertEquals(0, divQuantization,
+                "Quantização divergiu do float32 em " + divQuantization
+              + " query(s) — esperado 0 nesta fixture (acordo 100% com float32)");
     }
 
     // ── Fixture ──────────────────────────────────────────────────────────────────

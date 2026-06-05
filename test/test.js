@@ -20,7 +20,7 @@ const fnCount = new Counter('fn_count');
 const errorCount = new Counter('error_count');
 
 export const options = {
-    summaryTrendStats: ['p(99)'],
+    summaryTrendStats: ['p(50)', 'p(95)', 'p(99)'],
     systemTags: ['status', 'method'],
     dns: {
         ttl: '5m',
@@ -94,6 +94,8 @@ export function handleSummary(data) {
     const r = (v, decimals) => +v.toFixed(decimals);
 
     const httpDuration = data.metrics.http_req_duration.values;
+    const p50 = httpDuration['p(50)'];
+    const p95 = httpDuration['p(95)'];
     const p99 = httpDuration['p(99)'];
 
     const tp = data.metrics.tp_count ? data.metrics.tp_count.values.count : 0;
@@ -141,6 +143,8 @@ export function handleSummary(data) {
 
     const result = {
         expected: expectedStats,
+        p50: r(p50, PRECISION) + 'ms',
+        p95: r(p95, PRECISION) + 'ms',
         p99: r(p99, PRECISION) + 'ms',
         scoring: {
             breakdown: {
@@ -165,6 +169,8 @@ export function handleSummary(data) {
             },
             final_score: r(finalScore, PRECISION),
             raw: {
+                p50_ms: p50,
+                p95_ms: p95,
                 p99_ms: p99,
                 failure_rate: failureRate,
                 error_rate_epsilon: epsilon,
