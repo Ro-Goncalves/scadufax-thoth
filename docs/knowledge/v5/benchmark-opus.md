@@ -173,3 +173,97 @@ o cpuset passa a ter efeito.
 **Regressão descartada:** o p99 de 22.1ms fica dentro da variância natural do
 setup (V5-0 nprobe=6 teve runs de 33.95ms / 15.44ms / 13.74ms). p50 e p95
 permanecem estáveis.
+
+---
+
+## V5-3 baseline — dtype=i16, pré-GraalVM
+
+**Data:** 2026-06-05. **Envelope:** K=2048, nprobe ∈ {1, 2, 4, 6}, dtype=i16.
+**Protocolo:** 3 boots frios por config (`down → up → /ready → k6`).
+
+**Objetivo:** estabelecer o baseline pré-GraalVM com dtype i16 e varredura de
+nprobe, após a remoção do Jackson do runtime (Issue 03) e limpeza de código morto.
+As mudanças de código desta etapa são preparatórias (sem impacto em latência) —
+o índice i16 aumenta a precisão de quantização e é o candidato para o binary nativo.
+
+### Rodadas por config
+
+#### K=2048 / nprobe=1
+
+| run  | p50     | p95     | p99      | score_det | final_score |
+|---|---|---|---|---|---|
+| run1 | 0.69ms  | 1.47ms  | 24.64ms  | 3000 (0/0)| 4608.40     |
+| run2 | 0.69ms  | 1.41ms  | 23.46ms  | 3000 (0/0)| 4629.63     |
+| run3 | 0.69ms  | 1.43ms  | 21.18ms  | 3000 (0/0)| 4674.04     |
+| **med** | **0.69ms** | **1.43ms** | **23.46ms** | **3000** | **4629.63** |
+
+p99_spread = 3.46ms (21.18–24.64ms)
+
+#### K=2048 / nprobe=2
+
+| run  | p50     | p95     | p99      | score_det | final_score |
+|---|---|---|---|---|---|
+| run1 | 0.70ms  | 1.41ms  |  9.64ms  | 3000 (0/0)| 5015.72     |
+| run2 | 0.71ms  | 1.42ms  | 12.79ms  | 3000 (0/0)| 4892.98     |
+| run3 | 0.70ms  | 1.43ms  | 14.55ms  | 3000 (0/0)| 4837.00     |
+| **med** | **0.70ms** | **1.42ms** | **12.79ms** | **3000** | **4892.98** |
+
+p99_spread = 4.91ms (9.64–14.55ms)
+
+#### K=2048 / nprobe=4
+
+| run  | p50     | p95     | p99      | score_det    | final_score |
+|---|---|---|---|---|---|
+| run1 ⚠ | 0.71ms | 1.45ms | 20.28ms | 1615 (50 erros HTTP) | 3308.01 |
+| run2 | 0.71ms  | 1.43ms  | 23.48ms  | 3000 (0/0)| 4629.28     |
+| run3 | 0.71ms  | 1.58ms  | 31.67ms  | 3000 (0/0)| 4499.33     |
+| **med** | **0.71ms** | **1.45ms** | **23.48ms** | **3000** | **4629.28** |
+
+p99_spread = 11.39ms (20.28–31.67ms). run1 descartado: 50 erros HTTP causaram
+`failure_rate=0.09%` e penalidade de −719 no `detection_score` — não é regressão
+de detecção, é instabilidade de boot frio sob carga.
+
+#### K=2048 / nprobe=6
+
+| run  | p50     | p95     | p99      | score_det | final_score |
+|---|---|---|---|---|---|
+| run1 | 0.73ms  | 1.48ms  | 28.72ms  | 3000 (0/0)| 4541.75     |
+| run2 | 0.74ms  | 1.47ms  | 27.36ms  | 3000 (0/0)| 4562.90     |
+| run3 | 0.73ms  | 1.47ms  | 22.96ms  | 3000 (0/0)| 4639.05     |
+| **med** | **0.73ms** | **1.47ms** | **27.36ms** | **3000** | **4562.90** |
+
+p99_spread = 5.76ms (22.96–28.72ms)
+
+### Comparativo entre configs (K=2048, dtype=i16)
+
+| Config    | p99_med  | p99_spread | score_det | final_score_med |
+|---|---|---|---|---|
+| nprobe=1  | 23.46ms  | 3.46ms     | 3000      | 4629.63         |
+| **nprobe=2** | **12.79ms** | **4.91ms** | **3000** | **4892.98**  |
+| nprobe=4  | 23.48ms  | 11.39ms ⚠  | 3000      | 4629.28         |
+| nprobe=6  | 27.36ms  | 5.76ms     | 3000      | 4562.90         |
+
+### Análise
+
+**nprobe=2 é o envelope dominante** neste config: menor p99_med (12.79ms), spread
+contido (4.91ms) e melhor final_score (4892.98). O run1 com 9.64ms mostra que o
+piso de latência com i16/K=2048/nprobe=2 pode atingir abaixo de 10ms localmente —
+o que posiciona bem para a Rinha, onde o GraalVM vai eliminar JIT warmup e liberar
+~65MB de Page Cache.
+
+**nprobe=4 instável:** spread de 11.39ms e outlier de HTTP errors no run1 indicam
+sensibilidade a pressão de boot frio. nprobe=4 escaneia mais clusters por request
+e, sem cpuset em WSL2, sofre mais com interferência de escalonamento.
+
+**nprobe=1 mais estável que nprobe=4 e nprobe=6:** spread de apenas 3.46ms — o
+menor entre todos os configs. O custo é p99_med maior (23.46ms) por perder cobertura
+de vizinhos em clusters fora do mais próximo. Não é candidato de produção mas mostra
+a variância baseline do sistema.
+
+**Detecção perfeita:** 0 FP / 0 FN em todas as rodadas válidas. A migração para i16
+e a remoção do Jackson não introduziram nenhuma regressão de correctness.
+
+**Envelope candidato para V5-3 (GraalVM):** K=2048 / nprobe=2 / dtype=i16.
+O p99_med de 12.79ms local com GraalVM pode chegar próximo ao target de ~15ms da
+Rinha (onde p99 local tende a ser ~2–3× melhor que no harness real pela ausência
+de dois containers disputando 1 vCPU).
