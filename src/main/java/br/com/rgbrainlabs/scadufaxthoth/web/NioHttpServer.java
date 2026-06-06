@@ -24,12 +24,16 @@ import java.util.concurrent.locks.LockSupport;
  * o Jetty quanto uma primeira versão deste reactor. A varredura direta das
  * conexões com {@code read()}/{@code accept()} não-bloqueantes não usa epoll e
  * funciona no binário nativo. É o padrão dos top performers da Rinha
- * (lucasmontano: busy-poll, 0,25ms p99; arthurd3): num container pinado a 1 core
- * (0,45 vCPU), um único thread fazendo accept → read → search → write inline é
- * ótimo — sem Selector, sem pool de threads, sem context-switch.
+ * (lucasmontano: busy-poll, 0,25ms p99; arthurd3): um único thread fazendo
+ * accept → read → search → write inline, sem pool de threads e sem context-switch.
  *
- * <p>Há um backoff de poucos µs quando um ciclo inteiro não encontra trabalho,
- * para não queimar CPU à toa sem traffic; sob carga o loop nunca dorme.
+ * <p><b>Backoff CFS-aware (crítico sob cota fracionária).</b> O loop cede a CPU
+ * ({@code parkNanos}) sempre que um ciclo inteiro não encontra I/O pronto —
+ * inclusive com conexões keep-alive vivas mas ociosas. Sem isso, sob {@code cpus<1.0}
+ * (cota de CFS), o spin puro queima a cota girando e o kernel estrangula a instância,
+ * jogando a cauda de p95/p99 para ~55ms. O backoff mantém o uso abaixo da cota e a
+ * cauda baixa. Em core dedicado SEM cota o spin puro seria ótimo; sob cota fracionária
+ * (cenário da Rinha/0,45 vCPU) o backoff é obrigatório. Ver detalhes em {@code run()}.
  *
  * <p>Suporta keep-alive e pipelining de HTTP/1.1. Sem alocação no hot path: o
  * vetor de query, o buffer de corpo e as respostas HTTP são reaproveitados.
@@ -39,7 +43,7 @@ public final class NioHttpServer implements AutoCloseable {
     private static final int  BACKLOG     = 1024;
     private static final int  READ_CHUNK  = 8192;
     private static final int  MAX_REQUEST = 64 * 1024;        // teto defensivo por requisição
-    private static final long IDLE_PARK_NS = 20_000;          // backoff (20µs) quando ocioso
+    private static final long IDLE_PARK_NS = 50_000;          // backoff (50µs) quando um ciclo não acha trabalho
 
     private static final byte[] CRLFCRLF      = {'\r', '\n', '\r', '\n'};
     private static final byte[] H_CONTENT_LEN = "content-length:".getBytes(StandardCharsets.US_ASCII);
@@ -128,11 +132,16 @@ public final class NioHttpServer implements AutoCloseable {
                 }
             }
 
-            // Backoff só quando NÃO há conexões (antes do tráfego): evita queimar
-            // CPU em repouso. Com conexões vivas (keep-alive), spin puro — qualquer
-            // park aqui adicionaria latência ao próximo request (parkNanos tem
-            // resolução grosseira no nativo). É o padrão busy-poll do lucasmontano.
-            if (!didWork && conns.isEmpty()) LockSupport.parkNanos(IDLE_PARK_NS);
+            // Backoff sempre que um ciclo inteiro não encontrou trabalho — INCLUSIVE
+            // com conexões keep-alive vivas mas ociosas. Sob cota de CFS fracionária
+            // (cpus=0.45 no compose), spin puro varre O(N) conexões e queima a cota
+            // inteira girando (~45ms/100ms); o kernel então estrangula a instância
+            // pelos ~55ms restantes do período e a cauda de p99/p95 dispara para ~55ms.
+            // Ceder a CPU (park) quando não há I/O pronto mantém o uso abaixo da cota
+            // e elimina o throttle — os ~50µs de park são desprezíveis vs. ~55ms de
+            // estrangulamento. Em core dedicado SEM cota (cenário lucasmontano) spin
+            // puro seria ótimo; sob cota fracionária ele é o pior caso. Ver Issue 08.
+            if (!didWork) LockSupport.parkNanos(IDLE_PARK_NS);
         }
     }
 

@@ -19,6 +19,15 @@ const fpCount = new Counter('fp_count');
 const fnCount = new Counter('fn_count');
 const errorCount = new Counter('error_count');
 
+// Conexões/VUs e taxa de chegada configuráveis por env (mesmo idioma de
+// SCORE_PRECISION). Defaults alinhados ao cenário real do operador: os testes
+// nunca passam de ~30-50 VUs, então 250 VUs era superdimensionado e inflava o
+// p99 (mais conexões = mais varredura por iteração do reactor = mais cota de CPU
+// queimada sob throttle de CFS). RATE preserva o perfil de carga atual.
+const VUS = __ENV.VUS ? parseInt(__ENV.VUS) : 30;
+const MAX_VUS = __ENV.MAX_VUS ? parseInt(__ENV.MAX_VUS) : 50;
+const RATE = __ENV.RATE ? parseInt(__ENV.RATE) : 900;
+
 export const options = {
     summaryTrendStats: ['p(50)', 'p(95)', 'p(99)'],
     systemTags: ['status', 'method'],
@@ -31,11 +40,11 @@ export const options = {
             executor: 'ramping-arrival-rate',
             startRate: 1,
             timeUnit: '1s',
-            preAllocatedVUs: 100,
-            maxVUs: 250,
+            preAllocatedVUs: VUS,
+            maxVUs: MAX_VUS,
             gracefulStop: '10s',
             stages: [
-                { duration: '120s', target: 900 },
+                { duration: '120s', target: RATE },
             ],
         },
     },

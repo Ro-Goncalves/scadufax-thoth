@@ -18,6 +18,8 @@
 #   ./run-benchmark.sh
 #   DTYPE_VALUES="i8"        K_VALUES="1024" NPROBE_VALUES="4" RUNS=5 ./run-benchmark.sh
 #   DTYPE_VALUES="i8 i16"    K_VALUES="1024" NPROBE_VALUES="4" RUNS=3 ./run-benchmark.sh
+#   VUS=30  MAX_VUS=50  RUNS=3 ./run-benchmark.sh   # carga realista (default)
+#   VUS=250 MAX_VUS=250 RUNS=3 ./run-benchmark.sh   # reproduz o baseline antigo
 #
 # Pré-requisitos: docker, docker compose, jq, curl
 # Dica: rode com o host quieto (sem IDE/build concorrente) para reduzir ruído.
@@ -36,6 +38,11 @@ K_VALUES=(${K_VALUES:-2048 4096})
 NPROBE_VALUES=(${NPROBE_VALUES:-2 4 6})
 RUNS="${RUNS:-1}"               # boots frios por config
 SETTLE_SECS="${SETTLE_SECS:-10}" # pausa entre rodadas para o host assentar
+
+# Conexões/VUs do k6, no mesmo padrão das demais variáveis. Defaults alinhados ao
+# cenário real (~30-50 VUs); o test/docker-compose.yml as repassa ao container k6.
+VUS="${VUS:-30}"; MAX_VUS="${MAX_VUS:-50}"; RATE="${RATE:-900}"
+export VUS MAX_VUS RATE
 
 RESULTS_DIR="${RESULTS_DIR:-benchmark-results}"
 READY_URL="http://localhost:9999/ready"
