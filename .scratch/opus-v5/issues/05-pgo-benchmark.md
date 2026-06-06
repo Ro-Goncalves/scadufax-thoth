@@ -1,6 +1,9 @@
 # Issue 05: PGO loop + benchmark final
 
-Status: ready-for-agent (fazer **depois** da Issue 08 — ver nota de prioridade)
+Status: ✅ done (2026-06-06). PGO migrado para Oracle GraalVM (community não suporta),
+`default.iprof` gerado e committado, Dockerfile com `--pgo`. Critérios de p99<20ms e
+score>4800 atingidos **após** o fix da Issue 08 (V5-5): p99 1.344ms, score 5871.58.
+Ver `docs/knowledge/v5/benchmark-opus.md` (V5-4/V5-5).
 
 ## Nota de prioridade e realidade (2026-06-05)
 

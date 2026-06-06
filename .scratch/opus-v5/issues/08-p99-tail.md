@@ -1,6 +1,10 @@
 # Issue 08: Cauda de p99 — conexões configuráveis + busy-poll/CFS + sysctls
 
-Status: ready-for-agent — **PRIORIDADE ATUAL**
+Status: ✅ done (2026-06-06) — root cause foi spin puro no busy-poll do `NioHttpServer`
+sob cota de CFS (não conexões/sysctls). Fix de 1 linha (backoff CFS-aware: `parkNanos`
+sempre que `!didWork`, não só quando `conns.isEmpty()`). p99 57ms → 1.344ms, score
+4243 → 5872. Itens secundários (VUs configuráveis, sysctls, Selector) ficaram opcionais.
+Ver `docs/knowledge/v5/benchmark-opus.md` (V5-5).
 
 ## Issue pai
 

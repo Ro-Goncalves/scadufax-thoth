@@ -267,3 +267,164 @@ e a remoção do Jackson não introduziram nenhuma regressão de correctness.
 O p99_med de 12.79ms local com GraalVM pode chegar próximo ao target de ~15ms da
 Rinha (onde p99 local tende a ser ~2–3× melhor que no harness real pela ausência
 de dois containers disputando 1 vCPU).
+
+---
+
+## V5-4 — PGO (GraalVM Native + Profile-Guided Optimization)
+
+**Data:** 2026-06-06. **Envelope:** K=2048, nprobe=2, dtype=i16, binary nativo com
+`--pgo`. **Protocolo:** 5 boots frios (`down → up → /ready → k6`), **stack final
+constrangida** (HAProxy L4 + 2 instâncias `api01`/`api02`, 0,45 CPU por instância,
+350 MB total).
+
+**Objetivo:** fechar a V5 com o loop PGO. O perfil `default.iprof` (4,4 MB) foi
+gerado sobre o hot path final (NioHttpServer + MappedByteBuffer + SearchState) por
+um binary instrumentado (`--pgo-instrument`) sob carga K6 real (smoke + ramp de
+120s a 900 req/s), committado em `src/main/resources/pgo/`, e re-injetado no build
+de produção via `--pgo` (ver [`pgo-profile.sh`](../../../pgo-profile.sh)).
+
+> **Toolchain:** PGO é exclusivo do **Oracle GraalVM** (GFTC, gratuito). A imagem
+> `native-image-community` rejeita `--pgo`/`--pgo-instrument`. O estágio de build
+> nativo do Dockerfile migrou para `container-registry.oracle.com/graalvm/native-image:25`.
+
+### Rodadas (K=2048 / nprobe=2 / dtype=i16 / PGO)
+
+| run  | p50     | p95     | p99      | score_det | final_score |
+|---|---|---|---|---|---|
+| run1 | 3.50ms  | 51.73ms | 56.05ms  | 3000 (0/0)| 4251.43     |
+| run2 | 1.00ms  | 51.29ms | 55.68ms  | 3000 (0/0)| 4254.31     |
+| run3 | 14.10ms | 54.53ms | 59.57ms  | 3000 (0/0)| 4224.99     |
+| run4 | 7.08ms  | 52.39ms | 57.13ms  | 3000 (0/0)| 4243.15     |
+| run5 | 1.02ms  | 53.68ms | 57.51ms  | 3000 (0/0)| 4240.23     |
+| **med** | **3.50ms** | **52.39ms** | **57.13ms** | **3000** | **4243.15** |
+
+p99_spread = 3.89ms (55.68–59.57ms). Detecção perfeita (0 FP / 0 FN) em todas as 5
+rodadas — o AOT+PGO preserva a lógica de busca (proxy K6 da `V2QualityGuardTest`,
+que também passou verde no container Maven: 100% acordo quantização/IVF, 0 divergências).
+
+### Comparativo
+
+| Cenário                              | p99_med | score_med | score_det |
+|---|---|---|---|
+| V4 baseline (JVM, K=1024/np4)        | 40.50ms | 4394.24   | 3000      |
+| V5-3 i16 nprobe=2 (1 inst, livre)    | 12.79ms | 4892.98   | 3000      |
+| **Native sem PGO** (stack constrangida)¹ | **~62ms** | **~4200** | 3000  |
+| **V5-4 Native + PGO** (stack constrangida) | **57.13ms** | **4243.15** | 3000 |
+
+¹ Baseline native pré-PGO sob a mesma stack constrangida (pós-Issue 07), registrado
+em [`../../../.scratch/opus-v5/STATUS.md`](../../../.scratch/opus-v5/STATUS.md).
+
+### Análise
+
+**O PGO entrega um ganho marginal, exatamente como previsto.** Sob a stack
+constrangida, native+PGO move o p99_med de ~62ms → 57.13ms (~−8%) e o score de
+~4200 → 4243 (~+1%). O ganho é pequeno porque **a cauda p99 não é custo por
+request** — é a cauda do reactor busy-poll sob throttle de CFS a 0,45 CPU (Issue 08).
+O PGO otimiza o caminho de execução (p50/p95), não a janela em que o kernel
+estrangula a cota.
+
+**A cauda domina todo o topo da distribuição, não só o p99.** O p95_med (52.39ms)
+está colado no p99_med (57.13ms): ~5% das requisições já caem na janela
+estrangulada. Isso confirma o diagnóstico da Issue 08 — o lever de score está em
+reduzir a varredura por iteração do reactor (menos conexões / backoff CFS-friendly),
+não em reduzir o custo aritmético da busca.
+
+**Comparação com V5-3 (12.79ms) não é maçã-com-maçã:** o V5-3 foi medido em
+instância única sem o par HAProxy + 2× 0,45 CPU. A regressão 12.79ms → 57ms é o
+custo da topologia constrangida da Rinha (CFS throttle), não uma regressão do PGO.
+
+### Gate de progressão V6
+
+| Critério                  | Alvo      | V5-4 (PGO) | Status |
+|---|---|---|---|
+| score_det = 3.000         | = 3000    | 3000       | ✅      |
+| p99_med < 20ms            | < 20ms    | 57.13ms    | ❌      |
+
+**V6 NÃO desbloqueada pelo p99** *(nesta medição buggy)*. O bloqueio era a **Issue 08**
+(cauda CFS). A próxima alavanca de score é domar a cauda busy-poll/CFS.
+
+> **⚠ Correção (2026-06-06):** esta seção V5-4 mediu um binário com um **bug** no
+> busy-poll (`NioHttpServer` só cedia CPU quando não havia conexões → spin puro sob
+> keep-alive → throttle de CFS). A cauda de ~57ms **não era um teto fundamental**, era
+> o bug. A **V5-5** (abaixo) corrige numa linha e leva o p99 a **1.34ms**. Leia a V5-4
+> como o "antes" da correção, não como o envelope final do PGO.
+
+---
+
+## V5-5 — Fix da cauda p99: backoff CFS-aware no busy-poll (Issue 08)
+
+**Data:** 2026-06-06. **Envelope:** K=2048, nprobe=2, dtype=i16, native+PGO, **mesma
+stack constrangida** da V5-4 (HAProxy + 2× 0,45 CPU, 350 MB). **Protocolo:** 5 boots
+frios. **Única mudança vs. V5-4:** uma linha em `NioHttpServer.run()`.
+
+**Root cause.** O reactor busy-poll só fazia `parkNanos` quando `conns.isEmpty()`.
+Sob carga, o k6 mantém ~30 conexões keep-alive **sempre abertas** → o loop nunca
+dormia: spin puro a 100% de CPU varrendo O(N) conexões a cada iteração. Com `cpus=0.45`
+(cota de CFS: 45ms a cada 100ms), o spin queima a cota inteira girando e o kernel
+**estrangula a instância pelos ~55ms restantes** de cada período → todo request que
+chega na janela estrangulada espera ~55ms. Daí o p95=52ms / p99=57ms da V5-4.
+
+Por que o Jetty (V4/V5-3) não sofria: `Selector`/epoll **dorme no kernel quando
+ocioso** (zero CPU), nunca queimava a cota. A troca por busy-poll (Issue 06) foi a
+regressão, latente até o cap fracionário de CFS expô-la.
+
+**Fix (`NioHttpServer.java`):** ceder a CPU sempre que um ciclo não acha I/O pronto —
+inclusive com conexões keep-alive ociosas:
+
+```java
+// antes:  if (!didWork && conns.isEmpty()) LockSupport.parkNanos(IDLE_PARK_NS);
+// depois: if (!didWork)                    LockSupport.parkNanos(IDLE_PARK_NS);
+```
+
+`IDLE_PARK_NS` 20µs → 50µs. O park cede a CPU, mantém o uso (~0,22 CPU de busca real)
+abaixo da cota e **elimina o throttle**. Os ~50µs de park são desprezíveis vs. ~55ms
+de estrangulamento.
+
+### Rodadas (K=2048 / nprobe=2 / dtype=i16 / native+PGO / fix)
+
+| run  | p50     | p95     | p99      | score_det | final_score |
+|---|---|---|---|---|---|
+| run1 | 0.67ms  | 1.06ms  | 1.341ms  | 3000 (0/0)| 5872.48     |
+| run2 | 0.67ms  | 1.06ms  | 1.344ms  | 3000 (0/0)| 5871.58     |
+| run3 | 0.67ms  | 1.06ms  | 1.348ms  | 3000 (0/0)| 5870.40     |
+| run4 | 0.67ms  | 1.06ms  | 1.353ms  | 3000 (0/0)| 5868.79     |
+| run5 | 0.67ms  | 1.06ms  | 1.344ms  | 3000 (0/0)| 5871.65     |
+| **med** | **0.67ms** | **1.06ms** | **1.344ms** | **3000** | **5871.58** |
+
+p99_spread = **0.012ms** (1.341–1.353ms). Detecção perfeita (0 FP / 0 FN) nas 5 rodadas.
+
+### Comparativo — a jornada completa
+
+| Cenário                                   | p50     | p95     | p99      | score_med |
+|---|---|---|---|---|
+| V4 campeão (JVM, K=2048/np6)              | 0.75ms  | 1.34ms  | 12.25ms  | 4911.70   |
+| V5-3 melhor (JVM i16, K=2048/np2)         | 0.70ms  | 1.42ms  | 12.79ms  | 4892.98   |
+| V5-4 native+PGO **com bug busy-spin**     | 3.50ms  | 52.39ms | 57.13ms  | 4243.15   |
+| **V5-5 native+PGO + fix CFS-aware**       | **0.67ms** | **1.06ms** | **1.344ms** | **5871.58** |
+
+### Análise
+
+**A correção de uma linha recuperou a regressão E bateu o melhor número histórico.**
+p99 1.344ms vs. 12.25ms do campeão V4 (**−89%**); score 5871.58 vs. 4911.70 (**+19.6%**,
+e pela 1ª vez acima de 5.000). p50/p95 voltaram ao piso da busca (0.67/1.06ms),
+confirmando que toda a cauda da V5-4 era throttle de CFS, não custo de busca.
+
+**Estabilidade absurda:** spread de p99 de **12µs** entre 5 boots frios. Como a Rinha
+sorteia um tiro único, esse spread apertado é o que mais importa — o resultado é
+previsível em ~1.34ms.
+
+**Meta de ~1ms essencialmente atingida.** p50 0.67ms já está sub-ms; p99 1.344ms. O que
+sobra para empurrar o p99 abaixo de 1ms é segunda ordem: trocar o `parkNanos` por um
+`Selector`/epoll (zero latência adicionada, zero syscall ocioso) — só vale se a Rinha
+exigir. O envelope atual (busy-poll com backoff CFS-aware) já é dominante.
+
+### Gate de progressão V6 — reavaliado
+
+| Critério                  | Alvo      | V5-5       | Status |
+|---|---|---|---|
+| score_det = 3.000         | = 3000    | 3000       | ✅      |
+| p99_med < 20ms            | < 20ms    | **1.344ms**| ✅      |
+
+**V6 DESBLOQUEADA.** p99_med 1.344ms (≪ 20ms) e score_det=3000. A Issue 08 está
+resolvida pelo backoff CFS-aware; a Issue 05 (PGO) está aplicada. O `default.iprof`
+permanece válido (o caminho de busca não mudou; só o loop de I/O ocioso).

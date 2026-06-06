@@ -13,8 +13,9 @@ real divergiu do PRD em dois pontos descobertos na prática (ambos documentados 
 2. **`MemorySegment` (FFM) é ~14x mais lento no nativo** → trocamos por `MappedByteBuffer`.
    Foi o lever decisivo: a busca nativa voltou a sub-ms.
 
-Resultado atual (stack constrangida, cpuset, 0.45 CPU/inst, 350MB total): **0% de falha,
-0 FP/FN, score ~4200**, p50 2-15ms. **O p99 ~62ms é o teto atual** e é o foco agora.
+Resultado atual (stack constrangida, cpuset, 0.45 CPU/inst, 350MB total, K2048/np2):
+**0% de falha, 0 FP/FN, p50 0.67ms / p95 1.06ms / p99 1.344ms, score 5871.58** (mediana
+de 5 boots, spread de p99 de 12µs). Ver `docs/knowledge/v5/benchmark-opus.md` (V5-5).
 
 ## Issues
 
@@ -26,25 +27,27 @@ Resultado atual (stack constrangida, cpuset, 0.45 CPU/inst, 350MB total): **0% d
 | 04 | GraalVM Native Image sem PGO | ✅ done (ver desvios) |
 | 06 | Servidor NIO V6 (substitui Jetty) | ✅ done |
 | 07 | Busca via MappedByteBuffer | ✅ done |
-| 08 | Cauda de p99: conexões configuráveis + busy-poll/CFS + sysctls | 🔲 aberto — **PRIORIDADE** |
-| 05 | PGO loop + benchmark final | 🔲 aberto (depois da 08) |
+| 05 | PGO loop + benchmark final | ✅ done (2026-06-06; V5-4/V5-5) |
+| 08 | Cauda de p99: backoff CFS-aware no busy-poll | ✅ done (2026-06-06; fix de 1 linha) |
 
-## Prioridade de implementação (pós-benchmark)
+## Resolução da cauda de p99 (Issue 08) — 2026-06-06
 
-O p99 (~62ms) é **idêntico em todas as configs de K/nprobe** → não é custo de busca, é a
-**cauda do busy-poll sob throttle de CFS**. Por isso:
+O p99 (~57-62ms) era **idêntico em todas as configs de K/nprobe** → não era custo de
+busca. Era um **bug no busy-poll do `NioHttpServer`**: o reactor só cedia CPU
+(`parkNanos`) quando `conns.isEmpty()`; sob keep-alive (conexões sempre abertas) ele
+fazia **spin puro a 100% de CPU**, queimando a cota de CFS (0.45) e sendo estrangulado
+~55ms por período. **Fix de 1 linha:** ceder a CPU sempre que um ciclo não acha trabalho
+(`if (!didWork)`), park 20µs→50µs. Resultado: **p99 57ms → 1.344ms, score 4243 → 5872**.
 
-1. **Issue 08 (cauda de p99) — PRIMEIRO.** Maior lever de score hoje. Inclui:
-   - Tornar o número de conexões/VUs do `test.js` **configurável** (default 30; nunca passou
-     de 50). Menos conexões = menos varredura por iteração = menos cota de CPU queimada.
-   - Reavaliar `Selector` no nativo (o teste anterior foi confundido pelo hang do warmup,
-     já removido) ou backoff CFS-friendly no busy-poll.
-   - sysctls (`somaxconn`, `tcp_fastopen`).
-2. **Issue 05 (PGO) — DEPOIS.** Reduz custo por request (p50), mas **não** ataca a cauda
-   fixa de p99. Reavaliar os critérios (p99<20ms só vem após a 08).
-3. **Tuning de K/nprobe — adiado.** Enquanto o p99 dominar e for config-independente, o
-   ajuste de K/nprobe não move o score (todas as 6 configs deram ~4200). Decidir depois
-   da 08, com `K4096/np2` ou `K2048/np2` como candidatos (marginalmente melhores hoje).
+Itens secundários da Issue 08 (conexões/VUs configuráveis, sysctls, `Selector` nativo)
+ficaram **opcionais**: o backoff CFS-aware já resolveu a cauda. Trocar `parkNanos` por
+`Selector`/epoll é o único caminho para empurrar p99 < 1ms (zero latência de park), mas
+só vale se a Rinha exigir — o envelope atual (p50 0.67 / p99 1.34ms) já é dominante.
+
+**Tuning de K/nprobe — reavaliar agora** que o p99 deixou de dominar: com p99 ~1.3ms,
+o `score_p99` ainda manda no `final_score`, então configs que minimizam p99 (K2048/np2)
+seguem ótimos; reconfirmar K2048/np2 vs np6 com a cauda já domada se quiser fechar o
+envelope V6.
 
 ## Nota de estabilidade
 
