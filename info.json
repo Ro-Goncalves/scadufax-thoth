@@ -1,0 +1,7 @@
+{
+    "participants": ["Rodrigo Gonçalves"],
+    "social": ["https://github.com/Ro-Goncalves"],
+    "source-code-repo": "https://github.com/Ro-Goncalves/scadufax-thoth",
+    "stack": ["java", "graalvm-native-image", "oracle-graalvm-pgo", "haproxy", "ivf-ann", "i16-quantization"],
+    "open_to_work": false
+}

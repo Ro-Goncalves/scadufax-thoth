@@ -1,0 +1,44 @@
+services:
+  api01:
+    image: rgbrainlabs/scadufax-thoth:latest
+    cpuset: "0"
+    environment:
+      - PORT=8080
+      - NPROBE=2
+      - K_NEIGHBORS=5
+      - FRAUD_THRESHOLD=0.6
+    deploy:
+      resources:
+        limits:
+          cpus: '0.45'
+          memory: '145MB'
+
+  api02:
+    image: rgbrainlabs/scadufax-thoth:latest
+    cpuset: "1"
+    environment:
+      - PORT=8080
+      - NPROBE=2
+      - K_NEIGHBORS=5
+      - FRAUD_THRESHOLD=0.6
+    deploy:
+      resources:
+        limits:
+          cpus: '0.45'
+          memory: '145MB'
+
+  lb:
+    image: haproxy:lts-alpine
+    cpuset: "2"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - api01
+      - api02
+    ports:
+      - "9999:9999"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: '60MB'
