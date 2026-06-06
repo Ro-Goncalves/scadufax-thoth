@@ -25,10 +25,21 @@ RUN mkdir -p /data \
          ${NUM_CLUSTERS} ${KMEANS_ITERATIONS} ${KMEANS_SEED} ${DTYPE}
 
 # ── Estágio native-build: compila o binário nativo ────────────────────────────
-# Fallback: container-registry.oracle.com/graalvm/jdk:25
-FROM ghcr.io/graalvm/native-image-community:25 AS native-build
+# Oracle GraalVM (GFTC, gratuito) — necessário para PGO (--pgo/--pgo-instrument).
+# A Community Edition (ghcr.io/graalvm/native-image-community:25) NÃO suporta PGO:
+# rejeita o build com "Profile-guided optimizations are not available in GraalVM
+# Community Edition". Por isso o builder é o Oracle GraalVM, não o community.
+FROM container-registry.oracle.com/graalvm/native-image:25 AS native-build
 
-# A imagem community não inclui Maven; copiamos da imagem oficial do Maven.
+# Toggle de PGO sem tocar no pom: o native-image honra NATIVE_IMAGE_OPTIONS.
+#   - Default (produção): --pgo=<perfil committed> aplica o Profile-Guided Optimization.
+#   - Build instrumentado: docker build --build-arg NATIVE_IMAGE_PGO=--pgo-instrument
+#     gera o binário que produz o default.iprof (ver pgo-profile.sh).
+# --pgo e --pgo-instrument são mutuamente exclusivos; o toggle garante apenas um.
+ARG NATIVE_IMAGE_PGO="--pgo=src/main/resources/pgo/default.iprof"
+ENV NATIVE_IMAGE_OPTIONS=${NATIVE_IMAGE_PGO}
+
+# A imagem Oracle GraalVM não inclui Maven; copiamos da imagem oficial do Maven.
 # Compilar VIA native-maven-plugin (e não native-image cru) é essencial: o
 # plugin habilita o graalvm-reachability-metadata repository, que traz a
 # configuração de threading do Jetty. Sem ela o servidor sobe SEM pool de
@@ -61,6 +72,6 @@ EXPOSE 9999
 
 # Limite de heap explícito: sem isto o binário nativo usa 80% da RAM do cgroup
 # (~132 MB no container de 165 MB) e é morto por OOM sob carga. Espelha o
-# -Xms50m -Xmx80m do antigo runtime JVM. O Serial GC já é o default na imagem
-# community, e o índice é mmap (file-backed, evictável) fora do heap.
+# -Xms50m -Xmx80m do antigo runtime JVM. O Serial GC já é o default do native-image,
+# e o índice é mmap (file-backed, evictável) fora do heap.
 ENTRYPOINT ["/app/scadufax-thoth", "-Xms50m", "-Xmx80m"]
