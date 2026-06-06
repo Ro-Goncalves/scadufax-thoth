@@ -19,10 +19,11 @@ RESET='\033[0m'
 
 # Coleta dados: aggregate.json enriquecido > results_run*.json > results.json (legado)
 collect_rows() {
-  for dir in "$RESULTS_DIR"/K*/; do
+  for dir in "$RESULTS_DIR"/*K*/; do
     local name
     name=$(basename "$dir")
-    local K nprobe
+    local dtype K nprobe
+    dtype=$(echo "$name" | grep -oP '^[^_]+(?=_K)' || echo "—")
     K=$(echo "$name" | grep -oP 'K\K[0-9]+')
     nprobe=$(echo "$name" | grep -oP 'nprobe\K[0-9]+')
 
@@ -37,7 +38,7 @@ collect_rows() {
     fi
     [[ -z "$json" ]] && continue
 
-    jq -r --arg K "$K" --arg nprobe "$nprobe" '
+    jq -r --arg K "$K" --arg nprobe "$nprobe" --arg dtype "$dtype" '
       .scoring as $s |
       .scoring.breakdown as $b |
       ($b.true_positive_detections  // 0) as $tp |
@@ -63,7 +64,11 @@ collect_rows() {
       # depois calcula de .p99_ms.median (aggregate antigo)
       (.p99 // (if .p99_ms.median then (.p99_ms.median | tostring) + "ms" else "N/A" end)) as $p99_disp |
 
-      [$K,
+      # dtype: prefere campo do JSON (runs agregados), cai no argumento extraído do dirname
+      (.dtype // $dtype) as $dtype_disp |
+
+      [$dtype_disp,
+       $K,
        $nprobe,
        $p99_disp,
        (($s.p99_score.value       // 0) | . * 100 | round | . / 100 | tostring),
@@ -86,21 +91,21 @@ collect_rows() {
 # Cabeçalho
 print_header() {
   printf "${BOLD}${CYAN}"
-  printf "%-6s  %-7s  %-10s  %-10s  %-10s  %-12s  %-4s  %-4s  %-8s  %-8s  %-9s  %-6s  %-6s  %-7s  %-7s\n" \
-    "K" "nprobe" "p99" "score_p99" "score_det" "final_score" \
+  printf "%-5s  %-6s  %-7s  %-10s  %-10s  %-10s  %-12s  %-4s  %-4s  %-8s  %-8s  %-9s  %-6s  %-6s  %-7s  %-7s\n" \
+    "dtype" "K" "nprobe" "p99" "score_p99" "score_det" "final_score" \
     "FP" "FN" "fail%" \
     "recall%" "precis%" "F1%" "FPR%" \
     "cut_p99" "cut_det"
   printf "${RESET}"
-  printf '%0.s─' {1..140}; echo
+  printf '%0.s─' {1..152}; echo
 }
 
 # Linha de dados com destaque para melhores scores
 print_row() {
-  local K=$1 nprobe=$2 p99=$3 sp99=$4 sdet=$5 fscore=$6
-  local fp=$7 fn=$8 failrate=$9
-  local recall=${10} prec=${11} f1=${12} fpr=${13}
-  local cutp=${14} cutd=${15}
+  local dtype=$1 K=$2 nprobe=$3 p99=$4 sp99=$5 sdet=$6 fscore=$7
+  local fp=$8 fn=$9 failrate=${10}
+  local recall=${11} prec=${12} f1=${13} fpr=${14}
+  local cutp=${15} cutd=${16}
 
   local color="$RESET"
   # Verde se final_score >= 2800, amarelo >= 2600
@@ -110,8 +115,8 @@ print_row() {
   elif (( fscore_int >= 2600 )); then color="$YELLOW"
   fi
 
-  printf "${color}%-6s  %-7s  %-10s  %-10s  %-10s  %-12s  %-4s  %-4s  %-8s  %-8s  %-9s  %-6s  %-6s  %-7s  %-7s${RESET}" \
-    "$K" "$nprobe" "$p99" "$sp99" "$sdet" "$fscore" \
+  printf "${color}%-5s  %-6s  %-7s  %-10s  %-10s  %-10s  %-12s  %-4s  %-4s  %-8s  %-8s  %-9s  %-6s  %-6s  %-7s  %-7s${RESET}" \
+    "$dtype" "$K" "$nprobe" "$p99" "$sp99" "$sdet" "$fscore" \
     "$fp" "$fn" "$failrate" \
     "$recall" "$prec" "$f1" "$fpr" \
     "$cutp" "$cutd"
@@ -119,7 +124,7 @@ print_row() {
   printf "\n"
 }
 
-# Coleta, ordena por final_score desc (campo 6) e imprime
+# Coleta, ordena por final_score desc (campo 7) e imprime
 echo
 echo -e "${BOLD}Benchmark Summary — $(date '+%Y-%m-%d %H:%M')${RESET}"
 echo -e "Diretório: ${RESULTS_DIR}"
@@ -127,11 +132,11 @@ echo
 
 print_header
 
-# Ordena por final_score descrescente (campo 6, numérico)
+# Ordena por final_score descrescente (campo 7 após inserção de dtype, numérico)
 collect_rows \
-  | sort -t$'\t' -k6 -rn \
-  | while IFS=$'\t' read -r K nprobe p99 sp99 sdet fscore fp fn failrate recall prec f1 fpr cutp cutd; do
-      print_row "$K" "$nprobe" "$p99" "$sp99" "$sdet" "$fscore" \
+  | sort -t$'\t' -k7 -rn \
+  | while IFS=$'\t' read -r dtype K nprobe p99 sp99 sdet fscore fp fn failrate recall prec f1 fpr cutp cutd; do
+      print_row "$dtype" "$K" "$nprobe" "$p99" "$sp99" "$sdet" "$fscore" \
                 "$fp" "$fn" "$failrate" "$recall" "$prec" "$f1" "$fpr" "$cutp" "$cutd"
     done
 

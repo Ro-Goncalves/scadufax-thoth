@@ -2,8 +2,6 @@ package br.com.rgbrainlabs.scadufaxthoth.domain;
 
 import java.util.List;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-
 public record TransactionRequest(
         String id,
         TransactionRequest.TransactionData transaction,
@@ -21,7 +19,6 @@ public record TransactionRequest(
 
     public static record CustomerData(
             double avgAmount,
-            @JsonProperty("tx_count_24h")
             int txCount24h,
             List<String> knownMerchants
     ) {}

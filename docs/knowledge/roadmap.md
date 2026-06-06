@@ -281,7 +281,10 @@ Padrão de correção: `ThreadLocal<SearchState>` em `V2IndexSearcher`, exatamen
 
 ## V5: Opus — GraalVM Native Image + PGO
 
-**Objetivo:** eliminar JVM do contêiner, liberar ~65MB de RAM para Page Cache.
+> **Plano de execução detalhado em [`v5/01-opus.md`](v5/01-opus.md).**
+
+**Objetivo:** `~40ms → ~15ms` em p99, `~4.394 → ~4.800+` em score — análogo ao
+salto Onda 5→13 do arthurd3 (GraalVM AOT+PGO + cpuset + HAProxy splice).
 
 | Dimensão | JVM atual | GraalVM Native |
 |---|---|---|
@@ -290,70 +293,48 @@ Padrão de correção: `ThreadLocal<SearchState>` em `V2IndexSearcher`, exatamen
 | Startup | segundos | milissegundos |
 | JIT warmup | sim | zero (AOT) |
 
-**Nota crítica: usar PGO (Profile-Guided Optimization).**
-arthurd3 usa `default.iprof` no build do Native Image. Sem PGO, o ganho é menor.
-Processo:
-1. Rodar a app com agent de instrumentação: `native-image --pgo-instrument`
-2. Executar K6 smoke para gerar o perfil
-3. Recompilar com o perfil: `native-image --pgo=default.iprof`
+> A meta de **5ms p99** pertence à V6 (fd-passing, −80% p99). A V5 chega a ~15ms.
 
 ### V5-0: ThreadLocal\<SearchState\> no V2IndexSearcher
 
-O hot path ainda aloca por requisição mesmo após o parser V4-C:
-- `quantizeQuery()` → `new int[14]`
-- `toI16Query()` → `new short[14]`
-- `rankClusters()` → `new long[K]` + `new int[K]` (~16 KB para K=1024)
+**Pré-condição:** ✅ virtual threads desligadas (fix do V4-C).
 
-Padrão idêntico ao `ParseState` do parser: `ThreadLocal<SearchState>` no
-`V2IndexSearcher`. Com o pool fixo de platform threads, o ThreadLocal
-reutiliza de verdade — zero `new` no hot path de busca. Reduz GC pressure antes
-do build native, onde não há JIT para compensar alocações extras.
+Alocações residuais no hot path: `quantizeQuery()` → `new int[14]`, `toI16Query()` →
+`new short[14]`, `rankClusters()` → `new long[1024]` + `new int[1024]` (~12KB por
+request). `ThreadLocal<SearchState>` no `V2IndexSearcher` elimina todas — zero `new`
+no hot path de busca.
 
-> ⚠️ **Pré-condição:** virtual threads desligadas. Com VTs o padrão
-> reproduziria a regressão do `ParseState`. Confirmar Issue 07 antes de implementar.
+### V5-1: HAProxy L4 + splice
 
-**Caminho de implementação do GraalVM:**
-1. Adicionar `native-maven-plugin` ao `pom.xml`
-2. Rodar Tracing Agent com K6 smoke (captura reflection/resources de Javalin)
-3. Gerar `reflect-config.json`, `resource-config.json` em `META-INF/native-image`
-4. Novo Dockerfile: build com `ghcr.io/graalvm/native-image-community:25`, runner `distroless`
-5. Adicionar loop de PGO (instrumento → smoke → recompila)
-6. Validar `V2QualityGuardTest` e smoke K6
+Trocar nginx (L7) por HAProxy em modo TCP com `option splice-request / splice-response`.
+O `splice(2)` do Linux move bytes entre sockets no kernel sem cópia para o userspace
+do LB. Custo: apenas config — `docker-compose.yml` + `haproxy.cfg`.
 
-**Nota:** V4-C eliminou Jackson — principal fonte de reflection. Javalin ainda está
-presente; o Tracing Agent captura o que resta.
+arthurd3 combinou cpuset + HAProxy splice na Onda 13 e caiu de ~32ms para 14,59ms.
+
+### V5-2: cpuset pinning (descoberto na análise competitiva)
+
+Fixar cada container a um core físico via `cpuset` no docker-compose — elimina
+migração de thread entre cores e thrashing de cache L1/L2. Custo: 3 linhas no
+docker-compose. arthurd3 e lucasmontano usam esse padrão (lb: CPU 2, api1: CPU 0,
+api2: CPU 1).
+
+### V5-3: GraalVM Native Image + PGO
+
+**Processo:**
+1. Substituir `AppConfig.loadMap` por parser simples (elimina Jackson do runtime)
+2. `native-maven-plugin 0.10.3` no pom.xml
+3. Tracing Agent com K6 smoke → `META-INF/native-image` configs (Javalin/Jetty)
+4. Build sem PGO → validar smoke + `V2QualityGuardTest`
+5. Loop PGO: `--pgo-instrument` → smoke → `--pgo=default.iprof`
+6. Dockerfile multi-estágio com `distroless/base-debian12`
+
+**Nota sobre java.lang.foreign:** `Arena.ofShared()` + `MemorySegment` para mmap são
+suportados pelo GraalVM. O FFM que arthurd3 relata como problemático é a variante de
+chamadas nativas via `DowncallHandle/Linker` — não é nosso caso.
 
 **Referências:**
 - arthurd3: binário final de 12MB, score 5.731 partindo de ~4.393 sem Rust
-
-### V5-1: HAProxy L4 (TCP mode)
-
-Trocar o Nginx pelo HAProxy operando em modo TCP puro (L4). O Nginx em configuração
-padrão opera em L7: reconstrói o HTTP inteiro, faz parse dos cabeçalhos e abre uma
-nova conexão para o backend — trabalho que consome ~0.3 vCPU do orçamento global de
-1.5 vCPU da stack. O HAProxy em modo TCP é um "cano burro": recebe pacotes na porta
-9999 e distribui por round-robin sem tocar no payload.
-
-**Custo:** apenas config — `docker-compose.yml` + `haproxy.cfg`. Sem mudança em Java.
-
-```haproxy
-# haproxy.cfg
-frontend rinha
-    bind *:9999
-    mode tcp
-    default_backend apis
-
-backend apis
-    mode tcp
-    balance roundrobin
-    server api1 api1:8080 check
-    server api2 api2:8080 check
-```
-
-**Limitação:** HAProxy L4 ainda aceita e entrega cada conexão TCP — ocupa um fd e
-ciclos de CPU por conexão. O salto para fd-passing (V6) elimina esse overhead por
-completo: o LB transfere o fd do cliente para a API via `SCM_RIGHTS` e sai do caminho.
-O V5-1 é um degrau intermediário; o ganho definitivo de infra está na V6.
 
 ---
 
@@ -457,10 +438,11 @@ V2 finalizada (K=1024, nprobe=4)
                     ├── [GATE ✅ CRUZADO — final_score ~4394, score_det=3000 (teto)]
                     │
                     ├── V5 Opus (obra-prima) ← PRÓXIMO
-                    │      V5-0  ThreadLocal<SearchState> ← elimina últimas alocações
-                    │      V5-1  HAProxy L4 (TCP mode)    ← troca de config, libera ~0.3 vCPU
-                    │      GraalVM Native Image + PGO
-                    │      (V4-C eliminou Jackson; Javalin coberto pelo Tracing Agent)
+                    │      V5-0  ThreadLocal<SearchState> ← ~12KB GC/req eliminados
+                    │      V5-1  HAProxy L4 + splice      ← kernel splice, sem copy userspace
+                    │      V5-2  cpuset pinning            ← sem migração de core; cache affinity
+                    │      V5-3  GraalVM Native Image + PGO ← +65MB page cache, zero JIT warmup
+                    │      (plano detalhado: v5/01-opus.md)
                     │
                     ├── V6 Pontifex (pontes)
                     │      servidor NIO custom (ex-V4-E) + fd-passing LB (C/Rust)

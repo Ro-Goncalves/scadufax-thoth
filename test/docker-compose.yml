@@ -4,6 +4,10 @@ services:
     user: root
     environment:
       - K6_NO_USAGE_REPORT=true
+      # Conexões/VUs e taxa de chegada (lidas via __ENV em test.js).
+      - VUS=${VUS:-30}
+      - MAX_VUS=${MAX_VUS:-50}
+      - RATE=${RATE:-900}
     volumes:
       - .:/test
     working_dir: /test

@@ -117,6 +117,16 @@ Os riscos práticos para latência estão mais ligados a configuração excessiv
 * **Compilação nativa é uma otimização posterior:** AOT com GraalVM reduz drasticamente o footprint e o tempo de inicialização, mas introduz atrito de build, limitações com reflexão e maior complexidade de depuração. Deve ser tratada como etapa de refinamento, não como pré-requisito para validar a arquitetura.
 * **Javalin é o framework escolhido:** A decisão prioriza simplicidade operacional, baixo overhead, startup rápido e integração direta com uma abordagem de handlers enxutos.
 
+#### PGO exige Oracle GraalVM (não Community Edition)
+
+* **Trade-off de toolchain:** O *Profile-Guided Optimization* (`--pgo`/`--pgo-instrument`) do Native Image é recurso **exclusivo do Oracle GraalVM**, distribuído sob a licença GFTC (gratuito para este uso). A *Community Edition* (`ghcr.io/graalvm/native-image-community`) **rejeita** o build com PGO. Por isso o estágio de build nativo do Dockerfile usa `container-registry.oracle.com/graalvm/native-image:25` — a imagem community vira o fallback que não habilita PGO.
+* **Geração do perfil:** o `default.iprof` é gerado por um binary instrumentado rodando em container sob carga K6 real (smoke + ramp de 120s), committado em `src/main/resources/pgo/`, e re-injetado no build de produção via `--pgo`. O perfil é gerado sobre o hot path final (NioHttpServer + MappedByteBuffer + SearchState); só precisa ser regerado se o caminho de busca mudar. Ver `pgo-profile.sh` e [`v5/benchmark-opus.md`](v5/benchmark-opus.md) (seção V5-4).
+* **Efeito medido:** o PGO sozinho dá ganho marginal de p50/p95. O salto real veio do **fix CFS-aware do busy-poll** (Issue 08): sob a stack constrangida (HAProxy + 2× 0,45 CPU), a combinação native+PGO+fix entrega **p50 0.67ms / p95 1.06ms / p99 1.344ms / score 5871.58** (mediana de 5 boots, spread de p99 de 12µs) — ver `v5/benchmark-opus.md` (V5-5). A cauda de ~57ms anterior era throttle de CFS causado por spin puro no reactor, não custo de busca nem limite do PGO.
+
+#### Busy-poll vs. cota de CFS fracionária (lição central)
+
+Um reactor em **busy-poll puro** (spin sem ceder CPU) só é ótimo num **core dedicado sem cota**. Sob `cpus<1.0` (cota de CFS, como os 0,45 vCPU/instância da Rinha), o spin queima a cota inteira girando e o kernel estrangula a instância pelo resto do período (~55ms a cada 100ms) — jogando p95/p99 para ~55ms **independente de K/nprobe**. A correção é ceder a CPU (`parkNanos`) sempre que um ciclo não acha I/O pronto, mantendo o uso abaixo da cota. Custo: ~50µs de latência por park, desprezível. Alternativa de custo zero: `Selector`/epoll, que dorme no kernel quando ocioso (é o que o Jetty fazia). O sintoma diagnóstico é **p99 alto e idêntico em todas as configs** + CPU pregada no teto da cota mesmo com pouca carga real.
+
 #### Justificativa da Escolha por Java 25 LTS
 
 Java 25 LTS permanece como a linguagem principal por equilibrar produtividade, controle de memória em baixo nível, suporte maduro a concorrência e acesso a otimizações modernas em uma versão de suporte estendido. A combinação de Virtual Threads, arrays primitivos e eventual uso de SIMD via Vector API fornece um caminho coerente entre baseline funcional e otimização extrema.

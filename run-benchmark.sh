@@ -18,18 +18,31 @@
 #   ./run-benchmark.sh
 #   DTYPE_VALUES="i8"        K_VALUES="1024" NPROBE_VALUES="4" RUNS=5 ./run-benchmark.sh
 #   DTYPE_VALUES="i8 i16"    K_VALUES="1024" NPROBE_VALUES="4" RUNS=3 ./run-benchmark.sh
+#   VUS=30  MAX_VUS=50  RUNS=3 ./run-benchmark.sh   # carga realista (default)
+#   VUS=250 MAX_VUS=250 RUNS=3 ./run-benchmark.sh   # reproduz o baseline antigo
 #
 # Pré-requisitos: docker, docker compose, jq, curl
 # Dica: rode com o host quieto (sem IDE/build concorrente) para reduzir ruído.
 
 set -euo pipefail
 
+# ── Pré-requisitos ────────────────────────────────────────────────────────────
+for _dep in docker jq curl awk; do
+  command -v "$_dep" &>/dev/null || { echo "Erro: '$_dep' não encontrado. Instale e tente novamente."; exit 1; }
+done
+docker compose version &>/dev/null || { echo "Erro: 'docker compose' (v2) não encontrado."; exit 1; }
+
 # ── Matriz de experimentos ────────────────────────────────────────────────────
 DTYPE_VALUES=(${DTYPE_VALUES:-i16})
-K_VALUES=(${K_VALUES:-1024 2048 4096})
+K_VALUES=(${K_VALUES:-2048 4096})
 NPROBE_VALUES=(${NPROBE_VALUES:-2 4 6})
-RUNS="${RUNS:-3}"               # boots frios por config
+RUNS="${RUNS:-1}"               # boots frios por config
 SETTLE_SECS="${SETTLE_SECS:-10}" # pausa entre rodadas para o host assentar
+
+# Conexões/VUs do k6, no mesmo padrão das demais variáveis. Defaults alinhados ao
+# cenário real (~30-50 VUs); o test/docker-compose.yml as repassa ao container k6.
+VUS="${VUS:-30}"; MAX_VUS="${MAX_VUS:-50}"; RATE="${RATE:-900}"
+export VUS MAX_VUS RATE
 
 RESULTS_DIR="${RESULTS_DIR:-benchmark-results}"
 READY_URL="http://localhost:9999/ready"
@@ -185,6 +198,12 @@ for DTYPE in "${DTYPE_VALUES[@]}"; do
         if [[ "$v" == "true" ]]; then CUT_DET_ANY="true"; break; fi
       done
 
+      if [ "${#P99_VALUES[@]}" -gt 0 ]; then
+        P99_JSON=$(printf '%s\n' "${P99_VALUES[@]}" | jq -R 'tonumber' | jq -s '.')
+      else
+        P99_JSON='[]'
+      fi
+
       jq -n \
         --arg  dtype        "$DTYPE"             \
         --argjson runs      "${#P99_VALUES[@]}"  \
@@ -201,7 +220,7 @@ for DTYPE in "${DTYPE_VALUES[@]}"; do
         --arg  fr_med       "$FAILRATE_MED"      \
         --argjson cut_p99   "$CUT_P99_ANY"       \
         --argjson cut_det   "$CUT_DET_ANY"       \
-        --argjson p99_list  "$(printf '%s\n' "${P99_VALUES[@]:-}" | jq -R 'select(length>0)|tonumber' | jq -s '.')" \
+        --argjson p99_list  "$P99_JSON"          \
         '{
           dtype: $dtype,
           runs: $runs,
@@ -224,7 +243,7 @@ for DTYPE in "${DTYPE_VALUES[@]}"; do
           },
           final_score_median: ($score_med | tonumber?)
         }' \
-        > "$RUN_DIR/aggregate.json" 2>/dev/null || true
+        > "$RUN_DIR/aggregate.json" || log "AVISO: falha ao gravar aggregate.json para $RUN_DIR"
 
       # Guarda para a tabela de comparação
       COMPARE_KEY="${DTYPE}_K${K}_nprobe${NPROBE}"

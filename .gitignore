@@ -20,10 +20,13 @@ replay_pid*
 .gradle/
 build/
 target/
+target.locked/
 out/
+
+data/
+src/main/resources/META-INF/native-image/.lock
 
 .vscode/
 dataset.bin
 .m2repo
 TODO.md
-data/

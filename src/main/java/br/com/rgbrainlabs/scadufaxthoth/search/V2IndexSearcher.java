@@ -1,12 +1,10 @@
 package br.com.rgbrainlabs.scadufaxthoth.search;
 
 import br.com.rgbrainlabs.scadufaxthoth.domain.SearchResult;
-import br.com.rgbrainlabs.scadufaxthoth.prep.V2ArtifactBuilder;
 
 import java.io.*;
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
+import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -34,7 +32,16 @@ import java.util.List;
  */
 public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
-    private static final int DIMS = V2ArtifactBuilder.DIMS;
+    // Constantes do formato binário V2 — espelham V2ArtifactBuilder que vive em src/test.
+    private static final byte VERSION        = 2;
+    private static final byte DTYPE_I8       = 1;
+    private static final byte DTYPE_I16      = 2;
+    private static final int  DIMS           = 14;
+    private static final int  SCALE          = 127;
+    private static final int  SCALE_I16      = 10_000;
+    private static final int  RECORD_SIZE    = 16;  // 1(label)+14(i8)+1(padding)
+    private static final int  RECORD_SIZE_I16 = 30; // 1(label)+28(i16)+1(padding)
+    private static final int  K_NEIGHBORS    = 5;
 
     private static volatile long PREWARM_SINK = 0;
 
@@ -49,9 +56,9 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
     private final long[] offsets; // offsets relativos ao dataOffset
     private final int[][] bboxMin; // limite inferior por dimensão (espaço do dtype) — poda V4-A
     private final int[][] bboxMax; // limite superior por dimensão (espaço do dtype) — poda V4-A
-    private final Arena arena;
-    private final MemorySegment file;
+    private final MappedByteBuffer file; // índice mmap; LITTLE_ENDIAN (encoding V2)
     private final DistanceCalculator calculator;
+    private final ThreadLocal<SearchState> searchState;
 
     /** Retrocompatível — nprobe padrão = 8. */
     public V2IndexSearcher(Path artifactPath, DistanceCalculator calculator) throws IOException {
@@ -62,66 +69,72 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
             throws IOException {
         this.calculator = calculator;
         this.nprobe = nprobe;
-        this.arena = Arena.ofShared();
 
         Header header = readHeader(artifactPath);
         this.numClusters = header.numClusters;
         this.dataOffset = header.dataOffset;
         this.dtype = header.dtype;
-        this.scale = (dtype == V2ArtifactBuilder.DTYPE_I16) ? V2ArtifactBuilder.SCALE_I16 : V2ArtifactBuilder.SCALE;
-        this.recordSize = (dtype == V2ArtifactBuilder.DTYPE_I16) ? V2ArtifactBuilder.RECORD_SIZE_I16 : V2ArtifactBuilder.RECORD_SIZE;
+        this.scale = (dtype == DTYPE_I16) ? SCALE_I16 : SCALE;
+        this.recordSize = (dtype == DTYPE_I16) ? RECORD_SIZE_I16 : RECORD_SIZE;
         this.centroids = header.centroids;
         this.counts = header.counts;
         this.offsets = header.offsets;
         this.bboxMin = header.bboxMin;
         this.bboxMax = header.bboxMax;
 
+        final int nc = this.numClusters;
+        this.searchState = ThreadLocal.withInitial(() -> new SearchState(nc));
+
         try (FileChannel ch = FileChannel.open(artifactPath, StandardOpenOption.READ)) {
-            this.file = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size(), arena);
+            MappedByteBuffer m = ch.map(FileChannel.MapMode.READ_ONLY, 0, ch.size());
+            m.order(ByteOrder.LITTLE_ENDIAN); // shorts i16 do artefato são little-endian
+            this.file = m; // o mapeamento sobrevive ao fechamento do channel
         }
     }
 
     @Override
     public List<SearchResult> search(float[] queryVector, int k) {
-        int[] qi = quantizeQuery(queryVector);
+        SearchState s = searchState.get();
+        s.topK.reset();
+
+        quantizeQuery(queryVector, s.qi);
 
         // Ordena clusters por distância crescente ao centróide
-        int[] ranked = rankClusters(qi);
+        rankClusters(s.qi, s.distAndIdx, s.ranked);
 
-        TopKSelector selector = new TopKSelector(k);
         int probes = Math.min(nprobe, numClusters);
 
-        if (dtype == V2ArtifactBuilder.DTYPE_I16) {
-            short[] q16 = toI16Query(qi);
+        if (dtype == DTYPE_I16) {
+            toI16Query(s.qi, s.q16);
             // Aquecimento: varre os nprobe clusters mais próximos do centróide.
             for (int ci = 0; ci < probes; ci++) {
-                scanClusterI16(ranked[ci], q16, selector);
+                scanClusterI16(s.ranked[ci], s.q16, s.topK);
             }
             // Poda exata (desigualdade triangular): itera o restante em ordem de
             // distância ao centróide; pula o cluster inteiro quando seu lower-bound
             // geométrico já é pior que o k-ésimo vizinho atual.
             for (int ci = probes; ci < numClusters; ci++) {
-                int cluster = ranked[ci];
-                if (bboxLowerBound(qi, bboxMin[cluster], bboxMax[cluster]) > selector.worstDist()) {
+                int cluster = s.ranked[ci];
+                if (bboxLowerBound(s.qi, bboxMin[cluster], bboxMax[cluster]) > s.topK.worstDist()) {
                     continue;
                 }
-                scanClusterI16(cluster, q16, selector);
+                scanClusterI16(cluster, s.q16, s.topK);
             }
         } else {
-            byte[] q8 = toI8Query(qi);
+            toI8Query(s.qi, s.q8);
             for (int ci = 0; ci < probes; ci++) {
-                scanClusterI8(ranked[ci], q8, selector);
+                scanClusterI8(s.ranked[ci], s.q8, s.topK);
             }
             for (int ci = probes; ci < numClusters; ci++) {
-                int cluster = ranked[ci];
-                if (bboxLowerBound(qi, bboxMin[cluster], bboxMax[cluster]) > selector.worstDist()) {
+                int cluster = s.ranked[ci];
+                if (bboxLowerBound(s.qi, bboxMin[cluster], bboxMax[cluster]) > s.topK.worstDist()) {
                     continue;
                 }
-                scanClusterI8(cluster, q8, selector);
+                scanClusterI8(cluster, s.q8, s.topK);
             }
         }
 
-        return selector.materialize();
+        return s.topK.materialize();
     }
 
     /** Varre os registros do cluster (i16) inserindo cada um no top-k. Zero alocação por candidato. */
@@ -131,7 +144,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         for (int i = 0; i < blockCount; i++) {
             long recordBase = blockStart + (long) i * recordSize;
             double dist = calculator.calculateI16(q16, file, recordBase + 1, DIMS);
-            byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+            byte labelByte = file.get((int) recordBase);
             selector.tryInsert(dist, labelByte);
         }
     }
@@ -143,7 +156,7 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         for (int i = 0; i < blockCount; i++) {
             long recordBase = blockStart + (long) i * recordSize;
             double dist = calculator.calculateI8(q8, file, recordBase + 1, DIMS);
-            byte labelByte = file.get(ValueLayout.JAVA_BYTE, recordBase);
+            byte labelByte = file.get((int) recordBase);
             selector.tryInsert(dist, labelByte);
         }
     }
@@ -179,7 +192,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
     @Override
     public void close() {
-        arena.close();
+        // MappedByteBuffer não tem unmap explícito (liberado pelo Cleaner na coleta).
+        // Mantido para satisfazer AutoCloseable e o try-with-resources dos testes.
     }
 
     /** Bounding box inferior por cluster (espaço do dtype). Pacote-privado para teste/poda V4-A. */
@@ -209,15 +223,18 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
      */
     public long prewarm() {
         long t0 = System.currentTimeMillis();
-        long size = file.byteSize();
+        // MADV_WILLNEED + force-load: lê o mapeamento para a RAM e sinaliza ao page
+        // cache para mantê-lo residente, matando page faults frios no primeiro request.
+        file.load();
+        int size = file.capacity();
         long sink = 0;
         long accesses = 0;
-        for (long off = 0; off < size; off += 4096) {
-            sink += file.get(ValueLayout.JAVA_BYTE, off);
+        for (int off = 0; off < size; off += 4096) {
+            sink += file.get(off);
             accesses++;
         }
         if (size > 0 && (size % 4096) != 0) {
-            sink += file.get(ValueLayout.JAVA_BYTE, size - 1);
+            sink += file.get(size - 1);
         }
         PREWARM_SINK = sink;
         System.out.printf("[prewarm] %d páginas tocadas em %d ms%n",
@@ -227,10 +244,8 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    /** Ordena os índices de cluster por distância euclidiana ao quadrado até q. */
-    private int[] rankClusters(int[] q) {
-        long[] distAndIdx = new long[numClusters];
-
+    /** Ordena os índices de cluster por distância euclidiana ao quadrado até q. Escreve em ranked. */
+    private void rankClusters(int[] q, long[] distAndIdx, int[] ranked) {
         for (int c = 0; c < numClusters; c++) {
             int dist = centroidDist(q, centroids[c]);
             // Empacota: Distância nos 32 bits altos | Índice nos 32 bits baixos
@@ -241,12 +256,10 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         // naturalmente!
         Arrays.sort(distAndIdx);
 
-        int[] result = new int[numClusters];
         for (int i = 0; i < numClusters; i++) {
             // Extrai apenas os 32 bits baixos (o índice do cluster original)
-            result[i] = (int) distAndIdx[i];
+            ranked[i] = (int) distAndIdx[i];
         }
-        return result;
     }
 
     /**
@@ -262,20 +275,16 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         return (int) Math.min(sum, Integer.MAX_VALUE);
     }
 
-    private static byte[] toI8Query(int[] q) {
-        byte[] b = new byte[q.length];
+    private static void toI8Query(int[] q, byte[] dest) {
         for (int i = 0; i < q.length; i++) {
-            b[i] = (byte) q[i];
+            dest[i] = (byte) q[i];
         }
-        return b;
     }
 
-    private static short[] toI16Query(int[] q) {
-        short[] s = new short[q.length];
+    private static void toI16Query(int[] q, short[] dest) {
         for (int i = 0; i < q.length; i++) {
-            s[i] = (short) q[i];
+            dest[i] = (short) q[i];
         }
-        return s;
     }
 
     // ── Leitura do cabeçalho e diretório ─────────────────────────────────────────
@@ -290,13 +299,13 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
                 DataInputStream dis = new DataInputStream(raw)) {
 
             byte version = dis.readByte();
-            if (version != V2ArtifactBuilder.VERSION) {
+            if (version != VERSION) {
                 throw new IllegalStateException(
                         "Artefato V2 esperado (versão 2), encontrado: " + version);
             }
             short dims = dis.readShort();
             byte dtype = dis.readByte();
-            if (dtype != V2ArtifactBuilder.DTYPE_I8 && dtype != V2ArtifactBuilder.DTYPE_I16) {
+            if (dtype != DTYPE_I8 && dtype != DTYPE_I16) {
                 throw new IllegalStateException(
                         "dtype desconhecido (esperado 1=i8 ou 2=i16), encontrado: " + dtype);
             }
@@ -324,13 +333,42 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
         }
     }
 
+    // ── Estado thread-local ───────────────────────────────────────────────────────
+
+    /**
+     * Arrays pré-alocados por thread para eliminar alocações no hot path de busca.
+     * Uma instância é criada por thread na primeira chamada a search() e reutilizada
+     * em todas as chamadas subsequentes via ThreadLocal.
+     */
+    static final class SearchState {
+        final int[]         qi;
+        final short[]       q16;
+        final byte[]        q8;
+        final long[]        distAndIdx;
+        final int[]         ranked;
+        final double[]      topDist;
+        final byte[]        topLabel;
+        final TopKSelector  topK;
+
+        SearchState(int numClusters) {
+            qi         = new int   [DIMS];
+            q16        = new short [DIMS];
+            q8         = new byte  [DIMS];
+            distAndIdx = new long  [numClusters];
+            ranked     = new int   [numClusters];
+            topDist    = new double[K_NEIGHBORS];
+            topLabel   = new byte  [K_NEIGHBORS];
+            topK       = new TopKSelector(topDist, topLabel);
+        }
+    }
+
     /**
      * Lê um vetor de {@code dims} componentes do diretório: bytes signed (i8) ou
      * shorts little-endian (i16). Usado para o centróide e para os limites da bbox.
      */
     private static int[] readVector(DataInputStream dis, int dims, byte dtype) throws IOException {
         int[] v = new int[dims];
-        if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+        if (dtype == DTYPE_I16) {
             for (int d = 0; d < dims; d++) {
                 int lo = dis.readByte() & 0xFF;
                 int hi = dis.readByte() & 0xFF;
@@ -349,24 +387,22 @@ public final class V2IndexSearcher implements VectorSearcher, AutoCloseable {
      * Para i8:  −1.0f → Byte.MIN_VALUE,  demais → round(v × 127),  clamp [−127, 127].
      * Para i16: −1.0f → Short.MIN_VALUE, demais → round(v × 10000), clamp [−32767, 32767].
      */
-    private int[] quantizeQuery(float[] v) {
-        int[] q = new int[DIMS];
+    private void quantizeQuery(float[] v, int[] dest) {
         for (int d = 0; d < DIMS; d++) {
             float val = v[d];
             if (val == -1.0f) {
-                q[d] = (dtype == V2ArtifactBuilder.DTYPE_I16) ? Short.MIN_VALUE : Byte.MIN_VALUE;
+                dest[d] = (dtype == DTYPE_I16) ? Short.MIN_VALUE : Byte.MIN_VALUE;
             } else {
                 int r = Math.round(val * scale);
-                if (dtype == V2ArtifactBuilder.DTYPE_I16) {
+                if (dtype == DTYPE_I16) {
                     if (r < -32767) r = -32767;
                     if (r >  32767) r =  32767;
                 } else {
                     if (r < -127) r = -127;
                     if (r >  127) r =  127;
                 }
-                q[d] = r;
+                dest[d] = r;
             }
         }
-        return q;
     }
 }

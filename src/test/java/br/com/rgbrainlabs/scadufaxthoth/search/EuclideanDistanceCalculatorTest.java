@@ -5,18 +5,13 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
+import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class EuclideanDistanceCalculatorTest {
-
-    private static final ValueLayout.OfFloat  JAVA_FLOAT_BE          = ValueLayout.JAVA_FLOAT.withOrder(ByteOrder.BIG_ENDIAN);
-    private static final ValueLayout.OfShort JAVA_SHORT_LE_UNALIGNED = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     private final EuclideanDistanceCalculator calculator = new EuclideanDistanceCalculator();
 
@@ -26,42 +21,26 @@ class EuclideanDistanceCalculatorTest {
     void testCalculateSquaredDistance(String description, float[] queryVector, float[] storedVector, double expectedSquaredDistance) {
         int dimensions = queryVector.length;
 
-        // 1. Arena.ofConfined() cria um espaço de memória nativa que morre assim que o bloco try/catch termina
-        try (Arena arena = Arena.ofConfined()) {
-            
-            // 2. Alocamos o tamanho exato de bytes para o vetor armazenado (dimensões * 4 bytes)
-            MemorySegment simulatedSegment = arena.allocate((long) dimensions * 4);
-
-            // 3. Preenchemos o nosso segmento simulado com os dados do 'storedVector' usando BIG_ENDIAN
-            long writeOffset = 0;
-            for (float val : storedVector) {
-                simulatedSegment.set(JAVA_FLOAT_BE, writeOffset, val);
-                writeOffset += 4;
-            }
-
-            // 4. Executamos o método da nossa calculadora
-            // Passamos offset 0, pois o segmento alocado só contém este vetor
-            double actualDistance = calculator.calculate(queryVector, simulatedSegment, 0, dimensions);
-
-            // 5. Validação!
-            // Usamos um 'delta' (0.0001) porque operações com ponto flutuante podem ter imprecisões milimétricas
-            assertEquals(expectedSquaredDistance, actualDistance, 0.0001, 
-                    "Falha no cenário: " + description);
+        // Buffer com o vetor armazenado em BIG_ENDIAN (o path float lê BE explicitamente).
+        ByteBuffer buffer = ByteBuffer.allocate(dimensions * 4).order(ByteOrder.BIG_ENDIAN);
+        for (float val : storedVector) {
+            buffer.putFloat(val);
         }
+        buffer.flip();
+
+        double actualDistance = calculator.calculate(queryVector, buffer, 0, dimensions);
+
+        assertEquals(expectedSquaredDistance, actualDistance, 0.0001,
+                "Falha no cenário: " + description);
     }
 
     @ParameterizedTest(name = "[{index}] {0}")
     @MethodSource("provideI8TestCases")
     @DisplayName("Deve calcular distância euclidiana ao quadrado para int8")
     void testCalculateI8(String description, byte[] query, byte[] stored, double expected) {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment segment = arena.allocate(stored.length);
-            for (int i = 0; i < stored.length; i++) {
-                segment.set(ValueLayout.JAVA_BYTE, i, stored[i]);
-            }
-            double actual = calculator.calculateI8(query, segment, 0, stored.length);
-            assertEquals(expected, actual, 0.0, description);
-        }
+        ByteBuffer buffer = ByteBuffer.wrap(stored.clone());
+        double actual = calculator.calculateI8(query, buffer, 0, stored.length);
+        assertEquals(expected, actual, 0.0, description);
     }
 
     private static Stream<Arguments> provideI8TestCases() {
@@ -81,14 +60,14 @@ class EuclideanDistanceCalculatorTest {
     @MethodSource("provideI16TestCases")
     @DisplayName("Deve calcular distância euclidiana ao quadrado para int16")
     void testCalculateI16(String description, short[] query, short[] stored, double expected) {
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment segment = arena.allocate((long) stored.length * 2);
-            for (int i = 0; i < stored.length; i++) {
-                segment.set(JAVA_SHORT_LE_UNALIGNED, (long) i * 2, stored[i]);
-            }
-            double actual = calculator.calculateI16(query, segment, 0, stored.length);
-            assertEquals(expected, actual, 0.0, description);
+        // Buffer LITTLE_ENDIAN — o contrato de calculateI16 (encoding V2).
+        ByteBuffer buffer = ByteBuffer.allocate(stored.length * 2).order(ByteOrder.LITTLE_ENDIAN);
+        for (short s : stored) {
+            buffer.putShort(s);
         }
+        buffer.flip();
+        double actual = calculator.calculateI16(query, buffer, 0, stored.length);
+        assertEquals(expected, actual, 0.0, description);
     }
 
     private static Stream<Arguments> provideI16TestCases() {
